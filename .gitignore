@@ -3,6 +3,9 @@ client/dist/
 .idea/
 .workbuddy/
 proxy_config.json
+stats.db
+stats.db-shm
+stats.db-wal
 *.log
 .DS_Store
 Thumbs.db

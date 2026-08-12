@@ -32,4 +32,16 @@ export default {
 
   // 重启
   restart: () => request('/restart', { method: 'POST' }),
+
+  // 统计
+  getStatsOverview: () => request('/stats/overview'),
+  getStatsModels: () => request('/stats/models'),
+  getStatsGroups: () => request('/stats/groups'),
+  getStatsRecent: (limit = 100) => request(`/stats/recent?limit=${limit}`),
+  getStatsDaily: (days = 30) => request(`/stats/daily?days=${days}`),
+  clearStats: () => request('/stats', { method: 'DELETE' }),
+
+  // 设置
+  getSettings: () => request('/settings'),
+  updateSettings: (settings) => request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
 }

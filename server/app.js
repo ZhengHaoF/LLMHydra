@@ -8,6 +8,7 @@ const { URL } = require('url');
 const { spawn } = require('child_process');
 const { isValidGroupId } = require('./config-manager');
 const CircuitBreaker = require('./circuit-breaker');
+const statsManager = require('./stats-manager');
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19);
@@ -209,7 +210,6 @@ function createProxyMiddleware(configManager, circuitBreaker) {
     } else if (pathNoQuery === '/v1') {
       pathNoQuery = '/';
     }
-
     const baseHeaders = { ...req.headers };
     const isStream = rawBody.includes('"stream":true') || rawBody.includes('"stream": true');
 
@@ -222,6 +222,14 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         const state = circuitBreaker.states.get(model.id);
         const until = state ? new Date(state.circuitOpenUntil).toISOString() : '';
         log(`[SKIP]  model #${i + 1} (${model.display_name}) — circuit breaker open until ${until}`);
+        statsManager.recordRequest({
+          group_id: groupId,
+          model_id: model.id,
+          model_display: model.display_name,
+          path: pathNoQuery,
+          status: 'skipped',
+          error: 'circuit breaker open'
+        });
         continue;
       }
 
@@ -254,6 +262,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  try #${i + 1}/${models.length}  -> ${upstreamUrl.origin + targetPath}`);
 
       const timeoutMs = (model.endpoint_timeout || 30) * 1000;
+      const modelStart = Date.now();
 
       const result = await tryModel({
         model,
@@ -267,10 +276,25 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       if (result.ok) {
         circuitBreaker.recordSuccess(model.id);
         log(`[OK]    model #${i + 1} (${model.display_name}) status=${result.statusCode}`);
-        relayUpstream(result.upstreamRes, res, isStream);
+        const relayResult = await relayUpstream(result.upstreamRes, res, isStream);
+        const latency = Date.now() - modelStart;
+        const usage = relayResult && relayResult.usage ? relayResult.usage : null;
+        statsManager.recordRequest({
+          group_id: groupId,
+          model_id: model.id,
+          model_display: model.display_name,
+          path: pathNoQuery,
+          status: 'success',
+          status_code: result.statusCode,
+          prompt_tokens: usage ? (usage.prompt_tokens || 0) : 0,
+          completion_tokens: usage ? (usage.completion_tokens || 0) : 0,
+          total_tokens: usage ? (usage.total_tokens || 0) : 0,
+          latency_ms: latency
+        });
         return;
       }
 
+      const latency = Date.now() - modelStart;
       if (!result.retryable) {
         log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} ${result.reason || ''} — not retryable, abort.`);
         const headers = { 'Content-Type': 'application/json' };
@@ -281,11 +305,32 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         } catch {
           payload = { error: result.body || result.reason || 'upstream 4xx' };
         }
-        return res.end(JSON.stringify(payload));
+        res.end(JSON.stringify(payload));
+        statsManager.recordRequest({
+          group_id: groupId,
+          model_id: model.id,
+          model_display: model.display_name,
+          path: pathNoQuery,
+          status: 'failure',
+          status_code: result.statusCode,
+          latency_ms: latency,
+          error: result.reason || `HTTP ${result.statusCode}`
+        });
+        return;
       }
 
       circuitBreaker.recordFailure(model.id);
       log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} ${result.reason || ''} — try next.`);
+      statsManager.recordRequest({
+        group_id: groupId,
+        model_id: model.id,
+        model_display: model.display_name,
+        path: pathNoQuery,
+        status: 'failure',
+        status_code: result.statusCode,
+        latency_ms: latency,
+        error: result.reason || `HTTP ${result.statusCode}`
+      });
     }
 
     log(`[ALL-FAIL] ${models.length} model(s) exhausted for group "${groupId}"`);
@@ -304,99 +349,119 @@ function relayUpstream(upstreamRes, clientRes, isStream) {
       'connection': 'keep-alive'
     };
     clientRes.writeHead(upstreamRes.statusCode, rh);
-    handleSSE(upstreamRes, clientRes);
+    return handleSSE(upstreamRes, clientRes);
   } else if (ct.includes('application/json')) {
-    handleNonStreaming(upstreamRes, clientRes, upstreamRes.statusCode);
+    return handleNonStreaming(upstreamRes, clientRes, upstreamRes.statusCode);
   } else {
-    const rh = { ...upstreamRes.headers };
-    delete rh['transfer-encoding'];
-    clientRes.writeHead(upstreamRes.statusCode, rh);
-    upstreamRes.pipe(clientRes);
+    return new Promise((resolve) => {
+      const rh = { ...upstreamRes.headers };
+      delete rh['transfer-encoding'];
+      clientRes.writeHead(upstreamRes.statusCode, rh);
+      upstreamRes.pipe(clientRes);
+      upstreamRes.on('end', () => resolve({ usage: null }));
+      upstreamRes.on('error', () => {
+        if (!clientRes.writableEnded) clientRes.end();
+        resolve({ usage: null, error: true });
+      });
+    });
   }
 }
 
 function handleSSE(upstreamRes, clientRes) {
-  let buffer = '';
+  return new Promise((resolve) => {
+    let buffer = '';
+    let lastUsage = null;
 
-  upstreamRes.on('data', (chunk) => {
-    buffer += chunk.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+    upstreamRes.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-    for (const line of lines) {
-      let output = line;
-      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-        try {
-          const data = JSON.parse(line.slice(6));
-          if (data.choices && Array.isArray(data.choices)) {
-            for (const choice of data.choices) {
-              if (choice.delta) {
-                const r = transformDeltaContent(choice.delta);
-                if (r) choice.delta = r.delta;
+      for (const line of lines) {
+        let output = line;
+        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.usage) lastUsage = data.usage;
+            if (data.choices && Array.isArray(data.choices)) {
+              for (const choice of data.choices) {
+                if (choice.delta) {
+                  const r = transformDeltaContent(choice.delta);
+                  if (r) choice.delta = r.delta;
+                }
+              }
+              output = 'data: ' + JSON.stringify(data);
+            }
+          } catch (e) { /* pass through */ }
+        }
+        clientRes.write(output + '\n');
+      }
+    });
+
+    upstreamRes.on('end', () => {
+      if (buffer) {
+        const line = buffer.trim();
+        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.usage) lastUsage = data.usage;
+            if (data.choices && Array.isArray(data.choices)) {
+              for (const choice of data.choices) {
+                if (choice.delta) {
+                  const r = transformDeltaContent(choice.delta);
+                  if (r) choice.delta = r.delta;
+                }
               }
             }
-            output = 'data: ' + JSON.stringify(data);
-          }
-        } catch (e) { /* pass through */ }
+            clientRes.write('data: ' + JSON.stringify(data) + '\n');
+          } catch (e) { clientRes.write(line + '\n'); }
+        } else if (line) {
+          clientRes.write(line + '\n');
+        }
       }
-      clientRes.write(output + '\n');
-    }
-  });
+      clientRes.end();
+      resolve({ usage: lastUsage });
+    });
 
-  upstreamRes.on('end', () => {
-    if (buffer) {
-      const line = buffer.trim();
-      if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-        try {
-          const data = JSON.parse(line.slice(6));
-          if (data.choices && Array.isArray(data.choices)) {
-            for (const choice of data.choices) {
-              if (choice.delta) {
-                const r = transformDeltaContent(choice.delta);
-                if (r) choice.delta = r.delta;
-              }
-            }
-          }
-          clientRes.write('data: ' + JSON.stringify(data) + '\n');
-        } catch (e) { clientRes.write(line + '\n'); }
-      } else if (line) {
-        clientRes.write(line + '\n');
-      }
-    }
-    clientRes.end();
-  });
-
-  upstreamRes.on('error', () => {
-    if (!clientRes.writableEnded) clientRes.end();
+    upstreamRes.on('error', () => {
+      if (!clientRes.writableEnded) clientRes.end();
+      resolve({ usage: lastUsage, error: true });
+    });
   });
 }
 
 function handleNonStreaming(upstreamRes, clientRes, statusCode) {
-  let body = '';
-  upstreamRes.on('data', c => body += c.toString());
-  upstreamRes.on('end', () => {
-    let responseBody = body;
-    try {
-      const data = JSON.parse(body);
-      if (data.choices && Array.isArray(data.choices)) {
-        for (const choice of data.choices) {
-          if (choice.message) {
-            const r = transformMessageContent(choice.message);
-            if (r) choice.message = r.message;
+  return new Promise((resolve) => {
+    let body = '';
+    let usage = null;
+    upstreamRes.on('data', c => body += c.toString());
+    upstreamRes.on('end', () => {
+      let responseBody = body;
+      try {
+        const data = JSON.parse(body);
+        if (data.usage) usage = data.usage;
+        if (data.choices && Array.isArray(data.choices)) {
+          for (const choice of data.choices) {
+            if (choice.message) {
+              const r = transformMessageContent(choice.message);
+              if (r) choice.message = r.message;
+            }
           }
+          responseBody = JSON.stringify(data);
         }
-        responseBody = JSON.stringify(data);
-      }
-    } catch (e) { /* not JSON */ }
+      } catch (e) { /* not JSON */ }
 
-    const headers = { ...upstreamRes.headers };
-    delete headers['transfer-encoding'];
-    headers['content-length'] = Buffer.byteLength(responseBody);
-    clientRes.writeHead(statusCode, headers);
-    clientRes.end(responseBody);
-  });
-  upstreamRes.on('error', () => {
-    if (!clientRes.writableEnded) clientRes.end();
+      const headers = { ...upstreamRes.headers };
+      delete headers['transfer-encoding'];
+      headers['content-length'] = Buffer.byteLength(responseBody);
+      clientRes.writeHead(statusCode, headers);
+      clientRes.end(responseBody);
+      resolve({ usage });
+    });
+    upstreamRes.on('error', () => {
+      if (!clientRes.writableEnded) clientRes.end();
+      resolve({ usage, error: true });
+    });
   });
 }
 
@@ -406,7 +471,10 @@ function createApp(configManager) {
   const app = express();
   app.use(cors());
 
-  const circuitBreaker = new CircuitBreaker();
+  const circuitBreaker = new CircuitBreaker({
+    threshold: configManager.getSettings().circuit_breaker_threshold,
+    durationMs: configManager.getSettings().circuit_breaker_duration_min * 60 * 1000
+  });
 
   const api = express.Router();
   api.use(express.json());
@@ -487,6 +555,49 @@ function createApp(configManager) {
   // ---- 熔断器状态 ----
   api.get('/circuit-breaker', (req, res) => {
     res.json(circuitBreaker.getStatus());
+  });
+
+  // ---- 统计 ----
+  api.get('/stats/overview', (req, res) => {
+    res.json(statsManager.getOverview());
+  });
+
+  api.get('/stats/models', (req, res) => {
+    res.json({ models: statsManager.getModelStats() });
+  });
+
+  api.get('/stats/groups', (req, res) => {
+    res.json({ groups: statsManager.getGroupStats() });
+  });
+
+  api.get('/stats/recent', (req, res) => {
+    const limit = parseInt(req.query.limit) || 100;
+    res.json({ requests: statsManager.getRecentRequests(limit) });
+  });
+
+  api.get('/stats/daily', (req, res) => {
+    const days = parseInt(req.query.days) || 30;
+    res.json({ daily: statsManager.getDailyStats(days) });
+  });
+
+  api.delete('/stats', (req, res) => {
+    statsManager.clearAll();
+    res.json({ success: true });
+  });
+
+  // ---- 设置 ----
+  api.get('/settings', (req, res) => {
+    res.json(configManager.getSettings());
+  });
+
+  api.put('/settings', (req, res) => {
+    const s = configManager.updateSettings(req.body);
+    // 热更新熔断器配置
+    circuitBreaker.updateConfig({
+      threshold: s.circuit_breaker_threshold,
+      durationMs: s.circuit_breaker_duration_min * 60 * 1000
+    });
+    res.json({ success: true, settings: s });
   });
 
   // ---- 测试模型端点 ----

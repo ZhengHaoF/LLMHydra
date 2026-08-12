@@ -24,6 +24,7 @@
           <span class="badge endpoint-host">{{ endpointHost(m.endpoint) }}</span>
           <span v-if="isInChain(m.id)" class="badge in-chain">当前组</span>
           <span v-else-if="isInOtherChain(m.id)" class="badge other-chain">其他组</span>
+          <span v-if="getStats(m.id)" class="badge stats">{{ getStats(m.id) }}</span>
         </div>
         <button class="lib-del" @click.stop="pendingDelete = m.id" title="删除模型">✕</button>
       </div>
@@ -53,7 +54,8 @@ import { ref } from 'vue'
 const props = defineProps({
   models: { type: Array, default: () => [] },
   currentChain: { type: Array, default: () => [] }, // 当前画布上的 model id 列表
-  otherChains: { type: Array, default: () => [] }    // 其他配置组的 chain（model id 列表）
+  otherChains: { type: Array, default: () => [] },   // 其他配置组的 chain（model id 列表）
+  statsMap: { type: Object, default: () => ({}) }    // model_id -> { total_requests, total_tokens }
 })
 
 const emit = defineEmits(['add', 'edit', 'delete'])
@@ -95,6 +97,16 @@ function endpointHost(endpoint) {
   } catch (e) {
     return endpoint.url;
   }
+}
+
+function getStats(modelId) {
+  const s = props.statsMap[modelId]
+  if (!s || !s.total_requests) return null
+  const req = s.total_requests >= 1000 ? (s.total_requests / 1000).toFixed(1) + 'k' : s.total_requests
+  const tok = s.total_tokens >= 1000000 ? (s.total_tokens / 1000000).toFixed(1) + 'M'
+    : s.total_tokens >= 1000 ? (s.total_tokens / 1000).toFixed(1) + 'k'
+    : s.total_tokens
+  return `${req}次 ${tok}tok`
 }
 
 function confirmDelete() {
@@ -214,6 +226,12 @@ function confirmDelete() {
 .badge.other-chain {
   background: #fdf6ec;
   color: #e6a23c;
+}
+.badge.stats {
+  background: #ecf5ff;
+  color: #409eff;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 10px;
 }
 .lib-del {
   position: absolute;

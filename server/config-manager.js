@@ -24,8 +24,14 @@ const crypto = require('crypto');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'proxy_config.json');
 
+const DEFAULT_SETTINGS = {
+  circuit_breaker_threshold: 3,
+  circuit_breaker_duration_min: 5
+};
+
 const DEFAULT_CONFIG = {
   port: 8093,
+  settings: { ...DEFAULT_SETTINGS },
   groups: [],
   models: []
 };
@@ -81,6 +87,15 @@ function normalizeGroup(g) {
   return out;
 }
 
+function normalizeSettings(s) {
+  return {
+    circuit_breaker_threshold: (s && typeof s.circuit_breaker_threshold === 'number' && s.circuit_breaker_threshold >= 1)
+      ? s.circuit_breaker_threshold : DEFAULT_SETTINGS.circuit_breaker_threshold,
+    circuit_breaker_duration_min: (s && typeof s.circuit_breaker_duration_min === 'number' && s.circuit_breaker_duration_min >= 1)
+      ? s.circuit_breaker_duration_min : DEFAULT_SETTINGS.circuit_breaker_duration_min
+  };
+}
+
 class ConfigManager {
   constructor() {
     this._config = null;
@@ -98,6 +113,7 @@ class ConfigManager {
         const parsed = JSON.parse(raw);
         this._config = {
           port: parsed.port || 8093,
+          settings: normalizeSettings(parsed.settings),
           groups: Array.isArray(parsed.groups) ? parsed.groups.map(normalizeGroup) : [],
           models: Array.isArray(parsed.models) ? parsed.models.map(normalizeModel) : []
         };
@@ -246,6 +262,28 @@ class ConfigManager {
     this._ensureConfig();
     this._config.port = port;
     this.save();
+  }
+
+  // ---- 设置 ----
+
+  getSettings() {
+    this._ensureConfig();
+    return this._config.settings;
+  }
+
+  updateSettings(patch) {
+    this._ensureConfig();
+    const s = this._config.settings;
+    if (patch.circuit_breaker_threshold !== undefined) {
+      const v = parseInt(patch.circuit_breaker_threshold);
+      if (v >= 1 && v <= 100) s.circuit_breaker_threshold = v;
+    }
+    if (patch.circuit_breaker_duration_min !== undefined) {
+      const v = parseInt(patch.circuit_breaker_duration_min);
+      if (v >= 1 && v <= 1440) s.circuit_breaker_duration_min = v;
+    }
+    this.save();
+    return s;
   }
 }
 

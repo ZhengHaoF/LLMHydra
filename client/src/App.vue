@@ -5,6 +5,8 @@
       <span class="subtitle">多端点自动故障转移 · 节点画布编排</span>
       <div class="header-spacer"></div>
       <button class="btn-api" @click="showApiRef = true">接口</button>
+      <button class="btn-stats" @click="showStats = true">统计</button>
+      <button class="btn-settings" @click="showSettings = true">设置</button>
     </header>
 
     <main class="main">
@@ -30,6 +32,7 @@
             :models="models"
             :current-chain="currentChainIds"
             :other-chains="otherChainIdsList"
+            :stats-map="statsMap"
             @add="openAddModel"
             @edit="openEditModel"
             @delete="deleteModel"
@@ -64,6 +67,7 @@
       @cancel="closeEditor"
     />
 
+    <!-- API 弹窗 -->
     <Teleport to="body">
       <div v-if="showApiRef" class="api-overlay" @click.self="showApiRef = false">
         <div class="api-modal">
@@ -77,6 +81,12 @@
         </div>
       </div>
     </Teleport>
+
+    <!-- 统计弹窗 -->
+    <StatsModal :visible="showStats" @close="showStats = false" />
+
+    <!-- 设置弹窗 -->
+    <SettingsModal :visible="showSettings" @close="showSettings = false" @saved="onSettingsSaved" />
   </div>
 </template>
 
@@ -87,6 +97,8 @@ import ModelLibrary from './components/ModelLibrary.vue'
 import NodeCanvas from './components/NodeCanvas.vue'
 import ModelEditorModal from './components/ModelEditorModal.vue'
 import ApiReference from './components/ApiReference.vue'
+import StatsModal from './components/StatsModal.vue'
+import SettingsModal from './components/SettingsModal.vue'
 import api from './api.js'
 
 // ---- 状态 ----
@@ -97,7 +109,10 @@ const port = ref(8093)
 const editingId = ref(null)
 const editingIsNew = ref(false)
 const showApiRef = ref(false)
+const showStats = ref(false)
+const showSettings = ref(false)
 const canvasRef = ref(null)
+const modelStats = ref([])
 
 const editingModel = computed(() => {
   if (editingId.value === null) return null
@@ -125,6 +140,17 @@ const otherChainIdsList = computed(() => {
     .map((g) => g.chain)
 })
 
+const statsMap = computed(() => {
+  const map = {}
+  for (const m of modelStats.value) {
+    map[m.model_id] = {
+      total_requests: m.total_requests,
+      total_tokens: m.total_tokens
+    }
+  }
+  return map
+})
+
 // ---- 加载 ----
 async function loadData() {
   try {
@@ -149,12 +175,27 @@ async function loadData() {
   }
 }
 
+async function loadStats() {
+  try {
+    const res = await api.getStatsModels()
+    modelStats.value = res.models || []
+  } catch (e) {
+    console.error('加载统计失败:', e)
+  }
+}
+
+let statsTimer = null
+
 onMounted(() => {
   loadData()
+  loadStats()
+  // 每 30 秒刷新一次统计
+  statsTimer = setInterval(loadStats, 30000)
   window.addEventListener('library-drag-start', onLibraryDragStart)
 })
 
 onUnmounted(() => {
+  if (statsTimer) clearInterval(statsTimer)
   window.removeEventListener('library-drag-start', onLibraryDragStart)
 })
 
@@ -310,6 +351,11 @@ async function doRestart() {
     // 重启会断开连接，错误是预期的
   }
 }
+
+function onSettingsSaved() {
+  // 设置保存成功，不需要额外操作
+  console.log('设置已保存')
+}
 </script>
 
 <style>
@@ -342,6 +388,30 @@ async function doRestart() {
   transition: background 0.15s;
 }
 .btn-api:hover { background: rgba(255,255,255,0.25); }
+
+.btn-stats {
+  background: rgba(103,194,58,0.15);
+  color: #fff;
+  border: 1px solid rgba(103,194,58,0.25);
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.btn-stats:hover { background: rgba(103,194,58,0.25); }
+
+.btn-settings {
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.2);
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.btn-settings:hover { background: rgba(255,255,255,0.2); }
 
 .main {
   flex: 1;

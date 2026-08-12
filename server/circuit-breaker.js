@@ -1,11 +1,23 @@
-// circuit-breaker.js — 简单的熔断器实现
+// circuit-breaker.js — 可配置的熔断器实现
 
-const FAILURE_THRESHOLD = 3;        // 连续失败多少次后熔断
-const CIRCUIT_OPEN_DURATION = 5 * 60 * 1000; // 熔断持续 5 分钟
+const DEFAULT_THRESHOLD = 3;
+const DEFAULT_DURATION_MS = 5 * 60 * 1000;
 
 class CircuitBreaker {
-  constructor() {
+  constructor(opts = {}) {
     this.states = new Map(); // modelId → { failureCount, circuitOpenUntil }
+    this.threshold = opts.threshold || DEFAULT_THRESHOLD;
+    this.durationMs = opts.durationMs || DEFAULT_DURATION_MS;
+  }
+
+  /** 更新配置（热更新） */
+  updateConfig(opts = {}) {
+    if (opts.threshold !== undefined && opts.threshold >= 1) {
+      this.threshold = opts.threshold;
+    }
+    if (opts.durationMs !== undefined && opts.durationMs >= 60000) {
+      this.durationMs = opts.durationMs;
+    }
   }
 
   /** 判断模型是否可用（未熔断） */
@@ -30,8 +42,8 @@ class CircuitBreaker {
       this.states.set(modelId, state);
     }
     state.failureCount++;
-    if (state.failureCount >= FAILURE_THRESHOLD) {
-      state.circuitOpenUntil = Date.now() + CIRCUIT_OPEN_DURATION;
+    if (state.failureCount >= this.threshold) {
+      state.circuitOpenUntil = Date.now() + this.durationMs;
     }
   }
 
@@ -41,6 +53,7 @@ class CircuitBreaker {
     for (const [id, state] of this.states) {
       result[id] = {
         failureCount: state.failureCount,
+        threshold: this.threshold,
         circuitOpen: state.circuitOpenUntil ? Date.now() < state.circuitOpenUntil : false,
         circuitOpenUntil: state.circuitOpenUntil ? new Date(state.circuitOpenUntil).toISOString() : null
       };
