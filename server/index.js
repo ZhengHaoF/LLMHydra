@@ -13,6 +13,7 @@ async function main() {
 
   const config = configManager.getConfig();
   const port = config.port || 8093;
+  const adminPassword = configManager.getAdminPassword();
 
   console.log(`配置加载完成: ${config.models.length} 个模型`);
   if (config.models.length > 0) {
@@ -23,9 +24,10 @@ async function main() {
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`\n已启动: http://localhost:${port}`);
-    console.log(`  管理 API  : /api/*`);
-    console.log(`  AI 代理   : /*  → 上游模型`);
-    console.log(`  管理面板  : http://localhost:5173\n`);
+    console.log(`  管理面板  : http://localhost:${port}`);
+    console.log(`  管理密码  : ${adminPassword}`);
+    console.log(`  代理密钥  : ${config.settings.proxy_key}`);
+    console.log(`\n提示: 管理密码和代理密钥保存在 proxy_config.json 中\n`);
   });
 
   // 优雅退出

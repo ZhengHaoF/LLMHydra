@@ -30,12 +30,11 @@ const DEFAULT_SETTINGS = {
 };
 
 function generateProxyKey() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let key = '';
-  for (let i = 0; i < 32; i++) {
-    key += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return key;
+  return crypto.randomBytes(24).toString('base64url');
+}
+
+function generateAdminPassword() {
+  return crypto.randomBytes(16).toString('base64url');
 }
 
 const DEFAULT_CONFIG = {
@@ -45,8 +44,8 @@ const DEFAULT_CONFIG = {
   models: []
 };
 
-// group id 校验：仅允许中英文、数字、-
-const GROUP_ID_REGEX = /^[a-zA-Z0-9\u4e00-\u9fa5-]+$/;
+// group id 校验：仅允许英文、数字、-、_
+const GROUP_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 function isValidGroupId(id) {
   return typeof id === 'string' && id.length > 0 && GROUP_ID_REGEX.test(id);
@@ -102,7 +101,8 @@ function normalizeSettings(s) {
       ? s.circuit_breaker_threshold : DEFAULT_SETTINGS.circuit_breaker_threshold,
     circuit_breaker_duration_min: (s && typeof s.circuit_breaker_duration_min === 'number' && s.circuit_breaker_duration_min >= 1)
       ? s.circuit_breaker_duration_min : DEFAULT_SETTINGS.circuit_breaker_duration_min,
-    proxy_key: (s && typeof s.proxy_key === 'string') ? s.proxy_key : ''
+    proxy_key: (s && typeof s.proxy_key === 'string') ? s.proxy_key : '',
+    admin_password: (s && typeof s.admin_password === 'string' && s.admin_password.length > 0) ? s.admin_password : ''
   };
 }
 
@@ -130,17 +130,22 @@ class ConfigManager {
         // 如果没有 proxy_key，自动生成
         if (!this._config.settings.proxy_key) {
           this._config.settings.proxy_key = generateProxyKey();
-          this.save();
+        }
+        // 如果没有 admin_password，自动生成
+        if (!this._config.settings.admin_password) {
+          this._config.settings.admin_password = generateAdminPassword();
         }
         this.save();
       } else {
         this._config = { ...DEFAULT_CONFIG };
         this._config.settings.proxy_key = generateProxyKey();
+        this._config.settings.admin_password = generateAdminPassword();
         this.save();
       }
     } catch (e) {
       this._config = { ...DEFAULT_CONFIG };
       this._config.settings.proxy_key = generateProxyKey();
+      this._config.settings.admin_password = generateAdminPassword();
     }
     return this._config;
   }
@@ -313,6 +318,33 @@ class ConfigManager {
     this._config.settings.proxy_key = generateProxyKey();
     this.save();
     return this._config.settings.proxy_key;
+  }
+
+  getAdminPassword() {
+    this._ensureConfig();
+    return this._config.settings.admin_password;
+  }
+
+  getConfigSanitized() {
+    this._ensureConfig();
+    const config = JSON.parse(JSON.stringify(this._config));
+    // 脱敏：隐藏上游 API Key
+    if (Array.isArray(config.models)) {
+      for (const model of config.models) {
+        if (model.endpoint && model.endpoint.api_key) {
+          const key = model.endpoint.api_key;
+          model.endpoint.api_key_masked = key.length > 8
+            ? key.slice(0, 4) + '***' + key.slice(-4)
+            : '***';
+          delete model.endpoint.api_key;
+        }
+      }
+    }
+    // 脱敏：移除 admin_password
+    if (config.settings) {
+      delete config.settings.admin_password;
+    }
+    return config;
   }
 }
 

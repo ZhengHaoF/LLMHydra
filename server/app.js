@@ -2,14 +2,21 @@
 
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const http = require('http');
 const https = require('https');
+const path = require('path');
 const { URL } = require('url');
 const { spawn } = require('child_process');
 const { isValidGroupId } = require('./config-manager');
 const CircuitBreaker = require('./circuit-breaker');
 const statsManager = require('./stats-manager');
 const logManager = require('./log-manager');
+
+// SSE 连接数限制
+const MAX_SSE_CONNECTIONS = 10;
+let currentSSEConnections = 0;
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19);
@@ -40,6 +47,23 @@ function transformDeltaContent(delta) {
 
 function transformMessageContent(message) {
   return null;
+}
+
+// 从上游错误响应 body 中提取简短可读的错误详情（OpenAI 兼容格式 error.message），避免日志过长
+function extractErrorDetail(result) {
+  const raw = typeof result.body === 'string' ? result.body : '';
+  if (!raw) return result.reason || '';
+  let detail = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    const err = parsed.error;
+    if (typeof err === 'string' && err) detail = err;
+    else if (err && typeof err.message === 'string' && err.message) detail = err.message;
+    else if (typeof parsed.message === 'string' && parsed.message) detail = parsed.message;
+    else detail = raw;
+  } catch (_) { /* 非 JSON，直接使用原始 body */ }
+  detail = detail.replace(/\s+/g, ' ').trim();
+  return detail.length > 500 ? detail.slice(0, 500) + '…' : detail;
 }
 
 // 尝试一个模型（重试链上的一个节点）
@@ -88,7 +112,7 @@ function tryModel({ model, method, targetPath, baseHeaders, body, timeoutMs }) {
         upstreamRes.on('end', () => {
           settle({
             ok: false,
-            retryable: status === 401 || status === 403,
+            retryable: status === 401 || status === 403 || status === 429,
             statusCode: status,
             body: Buffer.concat(chunks).toString(),
             modelId: model.id
@@ -284,8 +308,9 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       }
 
       const latency = Date.now() - modelStart;
+      const errDetail = extractErrorDetail(result);
       if (!result.retryable) {
-        log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} ${result.reason || ''} — not retryable, abort.`);
+        log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — not retryable, abort.${errDetail ? ` upstream: ${errDetail}` : ''}`);
         const headers = { 'Content-Type': 'application/json' };
         res.writeHead(result.statusCode || 502, headers);
         let payload;
@@ -303,13 +328,13 @@ function createProxyMiddleware(configManager, circuitBreaker) {
           status: 'failure',
           status_code: result.statusCode,
           latency_ms: latency,
-          error: result.reason || `HTTP ${result.statusCode}`
+          error: errDetail || result.reason || `HTTP ${result.statusCode}`
         });
         return;
       }
 
       circuitBreaker.recordFailure(model.id);
-      log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} ${result.reason || ''} — try next.`);
+      log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — try next.${errDetail ? ` upstream: ${errDetail}` : ''}`);
       recordStats({
         group_id: groupId,
         model_id: model.id,
@@ -458,7 +483,61 @@ function handleNonStreaming(upstreamRes, clientRes, statusCode) {
 
 function createApp(configManager) {
   const app = express();
-  app.use(cors());
+
+  // 安全头
+  app.use(helmet({
+    contentSecurityPolicy: false,  // 允许内联脚本（Vue 需要）
+    crossOriginEmbedderPolicy: false
+  }));
+
+  // CORS 白名单
+  const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
+    : ['http://localhost:5173', 'http://localhost:8093'];
+
+  app.use(cors({
+    origin: (origin, callback) => {
+      // 允许无 origin（同源请求、curl、Postman）
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true
+  }));
+
+  // 管理 API 限流
+  const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,  // 15 分钟
+    max: 1000,  // 每个 IP 最多 1000 次请求
+    standardHeaders: true,
+    legacyHeaders: false
+  });
+
+  // 管理 API 鉴权中间件
+  const adminAuth = (req, res, next) => {
+    const adminPassword = configManager.getAdminPassword();
+
+    // 优先从 Authorization header 取，其次从 query string 取（SSE 不支持自定义 header）
+    let token = '';
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    } else if (req.query && req.query.token) {
+      token = req.query.token;
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: 'Missing admin token' });
+    }
+
+    if (token !== adminPassword) {
+      return res.status(401).json({ error: 'Invalid admin token' });
+    }
+
+    next();
+  };
 
   const circuitBreaker = new CircuitBreaker({
     threshold: configManager.getSettings().circuit_breaker_threshold,
@@ -466,11 +545,13 @@ function createApp(configManager) {
   });
 
   const api = express.Router();
-  api.use(express.json());
+  api.use(apiLimiter);
+  api.use(adminAuth);
+  api.use(express.json({ limit: '10mb' }));
 
-  // 整体配置
+  // 整体配置（脱敏）
   api.get('/config', (req, res) => {
-    res.json(configManager.getConfig());
+    res.json(configManager.getConfigSanitized());
   });
 
   // ---- 配置组 ----
@@ -580,6 +661,11 @@ function createApp(configManager) {
   });
 
   api.get('/logs/stream', (req, res) => {
+    if (currentSSEConnections >= MAX_SSE_CONNECTIONS) {
+      return res.status(503).json({ error: 'Too many SSE connections' });
+    }
+    currentSSEConnections++;
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -592,6 +678,7 @@ function createApp(configManager) {
     req.on('close', () => {
       clearInterval(ping);
       unsubscribe();
+      currentSSEConnections--;
     });
   });
 
@@ -738,10 +825,52 @@ function createApp(configManager) {
     }, 300);
   });
 
+  // 登录接口（不需要鉴权）
+  const publicApi = express.Router();
+  publicApi.use(express.json({ limit: '1mb' }));
+  publicApi.post('/login', (req, res) => {
+    const { password } = req.body;
+    const adminPassword = configManager.getAdminPassword();
+
+    if (!password || password !== adminPassword) {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+
+    res.json({ success: true, token: adminPassword });
+  });
+
+  app.use('/api', publicApi);
   app.use('/api', api);
 
-  // ========== 代理中间件 ==========
-  app.use(createProxyMiddleware(configManager, circuitBreaker));
+  // ========== 代理中间件（仅 OpenAI 兼容路径） ==========
+  const proxyPaths = ['/v1/chat/completions', '/chat/completions', '/v1/embeddings', '/embeddings', '/v1/models', '/models'];
+  const proxyMiddleware = createProxyMiddleware(configManager, circuitBreaker);
+
+  app.use((req, res, next) => {
+    const path = req.path.toLowerCase();
+    // 检查是否是代理路径
+    const isProxyPath = proxyPaths.some(p => path === p || path.startsWith(p + '/'));
+    if (isProxyPath && req.method === 'POST') {
+      return proxyMiddleware(req, res, next);
+    }
+    next();
+  });
+
+  // ========== 静态文件托管 ==========
+  const distDir = path.join(__dirname, '..', 'client', 'dist');
+  app.use(express.static(distDir));
+
+  // SPA 回退：非 API、非代理路径返回 index.html
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api')) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    res.sendFile(path.join(distDir, 'index.html'), (err) => {
+      if (err) {
+        res.status(404).json({ error: 'Not found' });
+      }
+    });
+  });
 
   return app;
 }

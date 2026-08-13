@@ -80,7 +80,9 @@ async function loadLogs() {
 function connectSSE() {
   if (eventSource) eventSource.close()
 
-  eventSource = new EventSource('/api/logs/stream')
+  const token = api.getToken()
+  const url = token ? `/api/logs/stream?token=${encodeURIComponent(token)}` : '/api/logs/stream'
+  eventSource = new EventSource(url)
 
   eventSource.onmessage = (e) => {
     try {

@@ -1,9 +1,34 @@
 <template>
   <div class="app">
+    <!-- 登录页 -->
+    <div v-if="!authenticated" class="login-page">
+      <div class="login-box">
+        <h1>LLMHydra</h1>
+        <p class="login-subtitle">管理面板登录</p>
+        <form @submit.prevent="doLogin">
+          <input
+            type="password"
+            v-model="loginPassword"
+            placeholder="请输入管理密码"
+            class="login-input"
+            autofocus
+          />
+          <button type="submit" class="login-btn" :disabled="loginLoading">
+            {{ loginLoading ? '登录中...' : '登录' }}
+          </button>
+        </form>
+        <p v-if="loginError" class="login-error">{{ loginError }}</p>
+        <p class="login-hint">管理密码在启动时打印在控制台</p>
+      </div>
+    </div>
+
+    <!-- 主界面 -->
+    <template v-else>
     <header class="header">
       <h1>LLMHydra</h1>
       <span class="subtitle">多端点自动故障转移 · 节点画布编排</span>
       <div class="header-spacer"></div>
+      <button class="btn-logout" @click="doLogout">退出</button>
       <button class="btn-api" @click="showApiRef = true">接口</button>
       <button class="btn-stats" @click="showStats = true">统计</button>
       <button class="btn-settings" @click="showSettings = true">设置</button>
@@ -93,6 +118,7 @@
 
     <!-- 设置弹窗 -->
     <SettingsModal :visible="showSettings" @close="showSettings = false" @saved="onSettingsSaved" />
+    </template>
   </div>
 </template>
 
@@ -108,6 +134,12 @@ import StatsModal from './components/StatsModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import api from './api.js'
 import { IconX } from '@tabler/icons-vue'
+
+// ---- 认证状态 ----
+const authenticated = ref(false)
+const loginPassword = ref('')
+const loginError = ref('')
+const loginLoading = ref(false)
 
 // ---- 状态 ----
 const groups = ref([])
@@ -196,17 +228,68 @@ async function loadStats() {
 let statsTimer = null
 
 onMounted(() => {
-  loadData()
-  loadStats()
-  // 每 30 秒刷新一次统计
-  statsTimer = setInterval(loadStats, 30000)
+  // 检查是否已有 token
+  const token = api.getToken()
+  if (token) {
+    authenticated.value = true
+    loadData()
+    loadStats()
+    statsTimer = setInterval(loadStats, 30000)
+  }
+
+  // 监听认证过期事件
+  window.addEventListener('auth-expired', handleAuthExpired)
   window.addEventListener('library-drag-start', onLibraryDragStart)
 })
 
 onUnmounted(() => {
   if (statsTimer) clearInterval(statsTimer)
+  window.removeEventListener('auth-expired', handleAuthExpired)
   window.removeEventListener('library-drag-start', onLibraryDragStart)
 })
+
+// ---- 登录/登出 ----
+async function doLogin() {
+  if (!loginPassword.value.trim()) {
+    loginError.value = '请输入密码'
+    return
+  }
+
+  loginLoading.value = true
+  loginError.value = ''
+
+  try {
+    const res = await api.login(loginPassword.value)
+    if (res.success) {
+      api.setToken(res.token)
+      authenticated.value = true
+      loginPassword.value = ''
+      loadData()
+      loadStats()
+      statsTimer = setInterval(loadStats, 30000)
+    } else {
+      loginError.value = res.error || '登录失败'
+    }
+  } catch (e) {
+    loginError.value = '登录失败，请重试'
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+function doLogout() {
+  api.clearToken()
+  authenticated.value = false
+  if (statsTimer) {
+    clearInterval(statsTimer)
+    statsTimer = null
+  }
+}
+
+function handleAuthExpired() {
+  authenticated.value = false
+  loginError.value = '会话已过期，请重新登录'
+}
 
 // ---- 配置组操作 ----
 function setActiveGroup(id) {
@@ -378,6 +461,105 @@ function onSettingsSaved() {
   display: flex;
   flex-direction: column;
   background: #f5f7fa;
+}
+
+/* 登录页面样式 */
+.login-page {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.login-box {
+  background: white;
+  padding: 40px;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  width: 400px;
+  text-align: center;
+}
+
+.login-box h1 {
+  font-size: 32px;
+  color: #303133;
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+
+.login-subtitle {
+  font-size: 14px;
+  color: #909399;
+  margin-bottom: 32px;
+}
+
+.login-input {
+  width: 100%;
+  padding: 12px 16px;
+  border: 2px solid #dcdfe6;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 16px;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.login-input:focus {
+  outline: none;
+  border-color: #409eff;
+}
+
+.login-btn {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.login-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.login-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.login-error {
+  color: #f56c6c;
+  font-size: 14px;
+  margin-top: 12px;
+  text-align: left;
+}
+
+.login-hint {
+  color: #909399;
+  font-size: 12px;
+  margin-top: 16px;
+  text-align: left;
+}
+
+.btn-logout {
+  background: rgba(245, 108, 108, 0.15);
+  color: #fff;
+  border: 1px solid rgba(245, 108, 108, 0.25);
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+  margin-right: 8px;
+}
+
+.btn-logout:hover {
+  background: rgba(245, 108, 108, 0.25);
 }
 .header {
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);

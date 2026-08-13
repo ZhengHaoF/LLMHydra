@@ -1,11 +1,40 @@
 // api.js — 前端 API 客户端
 const BASE = '/api';
+const TOKEN_KEY = 'llmhydra_admin_token';
+
+function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+function setToken(token) {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+}
 
 async function request(url, options = {}) {
+  const token = getToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...options.headers
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
   const res = await fetch(`${BASE}${url}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options
+    ...options,
+    headers
   });
+
+  if (res.status === 401) {
+    clearToken();
+    window.dispatchEvent(new CustomEvent('auth-expired'));
+    throw new Error('Authentication required');
+  }
+
   return res.json();
 }
 
@@ -14,6 +43,18 @@ function encodeId(id) {
 }
 
 export default {
+  // 登录
+  login: (password) => fetch(`${BASE}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password })
+  }).then(res => res.json()),
+
+  // Token 管理
+  setToken,
+  clearToken,
+  getToken,
+
   // 整体配置
   getConfig: () => request('/config'),
 

@@ -81,7 +81,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import api from '../api.js'
 
 const props = defineProps({
@@ -92,6 +92,11 @@ const proxyKey = ref('')
 const toastVisible = ref(false)
 const toastMessage = ref('')
 let toastTimer = null
+
+// 动态获取当前访问地址
+const baseUrl = computed(() => {
+  return window.location.origin
+})
 
 function showToast(message) {
   if (toastTimer) clearTimeout(toastTimer)
@@ -112,7 +117,7 @@ async function loadProxyKey() {
 }
 
 function copyUrl() {
-  const url = `http://localhost:${props.proxyPort}`
+  const url = baseUrl.value
   navigator.clipboard.writeText(url).then(() => {
     showToast('已复制到剪贴板')
   }).catch(() => {})
