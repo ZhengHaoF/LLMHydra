@@ -28,6 +28,14 @@
                 <div class="stat-label">总 Token</div>
                 <div class="stat-value">{{ formatNumber(overview.total_tokens) }}</div>
               </div>
+              <div class="stat-card">
+                <div class="stat-label">成功率</div>
+                <div class="stat-value" :class="getRateClass(overview.success_rate)">{{ overview.success_rate != null ? overview.success_rate + '%' : '-' }}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">平均延迟</div>
+                <div class="stat-value">{{ overview.avg_latency_ms != null ? overview.avg_latency_ms + 'ms' : '-' }}</div>
+              </div>
             </div>
           </div>
 
@@ -43,6 +51,8 @@
                     <th>成功</th>
                     <th>失败</th>
                     <th>跳过</th>
+                    <th>成功率</th>
+                    <th>平均延迟</th>
                     <th>Token</th>
                     <th>最后使用</th>
                   </tr>
@@ -54,11 +64,13 @@
                     <td class="success">{{ m.success_count }}</td>
                     <td class="failure">{{ m.failure_count }}</td>
                     <td>{{ m.skipped_count }}</td>
+                    <td :class="getRateClass(m.success_rate)">{{ m.success_rate != null ? m.success_rate + '%' : '-' }}</td>
+                    <td>{{ m.avg_latency_ms != null ? m.avg_latency_ms + 'ms' : '-' }}</td>
                     <td>{{ formatNumber(m.total_tokens) }}</td>
                     <td>{{ formatTime(m.last_used) }}</td>
                   </tr>
                   <tr v-if="modelStats.length === 0">
-                    <td colspan="7" class="empty">暂无数据</td>
+                    <td colspan="9" class="empty">暂无数据</td>
                   </tr>
                 </tbody>
               </table>
@@ -76,6 +88,9 @@
                     <th>请求数</th>
                     <th>成功</th>
                     <th>失败</th>
+                    <th>跳过</th>
+                    <th>成功率</th>
+                    <th>平均延迟</th>
                     <th>Token</th>
                     <th>最后使用</th>
                   </tr>
@@ -86,11 +101,14 @@
                     <td>{{ g.total_requests }}</td>
                     <td class="success">{{ g.success_count }}</td>
                     <td class="failure">{{ g.failure_count }}</td>
+                    <td>{{ g.skipped_count }}</td>
+                    <td :class="getRateClass(g.success_rate)">{{ g.success_rate != null ? g.success_rate + '%' : '-' }}</td>
+                    <td>{{ g.avg_latency_ms != null ? g.avg_latency_ms + 'ms' : '-' }}</td>
                     <td>{{ formatNumber(g.total_tokens) }}</td>
                     <td>{{ formatTime(g.last_used) }}</td>
                   </tr>
                   <tr v-if="groupStats.length === 0">
-                    <td colspan="6" class="empty">暂无数据</td>
+                    <td colspan="9" class="empty">暂无数据</td>
                   </tr>
                 </tbody>
               </table>
@@ -157,7 +175,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import api from '../api.js'
 
 const props = defineProps({
@@ -176,6 +194,7 @@ const modelStats = ref([])
 const groupStats = ref([])
 const recentRequests = ref([])
 const showConfirm = ref(false)
+let eventSource = null
 
 async function loadStats() {
   try {
@@ -194,8 +213,43 @@ async function loadStats() {
   }
 }
 
+// 建立 SSE 连接，收到统计更新事件后自动刷新
+function connectSSE() {
+  if (eventSource) return
+  eventSource = new EventSource('/api/logs/stream')
+
+  eventSource.onmessage = (e) => {
+    try {
+      const entry = JSON.parse(e.data)
+      if (entry.type === 'stats') loadStats()
+    } catch (err) {
+      console.error('解析统计事件失败:', err)
+    }
+  }
+
+  eventSource.onerror = () => {
+    // SSE 断开自动重连，无需额外处理
+  }
+}
+
+function disconnectSSE() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+}
+
 watch(() => props.visible, (val) => {
-  if (val) loadStats()
+  if (val) {
+    loadStats()
+    connectSSE()
+  } else {
+    disconnectSSE()
+  }
+})
+
+onUnmounted(() => {
+  disconnectSSE()
 })
 
 function close() {
@@ -238,6 +292,13 @@ function formatTime(ts) {
 function statusText(status) {
   const map = { success: '成功', failure: '失败', skipped: '跳过' }
   return map[status] || status
+}
+
+function getRateClass(rate) {
+  if (rate == null) return ''
+  if (rate >= 95) return 'success'
+  if (rate >= 80) return 'warning'
+  return 'failure'
 }
 </script>
 
@@ -355,6 +416,10 @@ function statusText(status) {
   color: #f56c6c;
 }
 
+.stat-value.warning {
+  color: #e6a23c;
+}
+
 .table-container {
   overflow-x: auto;
 }
@@ -389,6 +454,10 @@ td.success {
 
 td.failure {
   color: #f56c6c;
+}
+
+td.warning {
+  color: #e6a23c;
 }
 
 td.empty {

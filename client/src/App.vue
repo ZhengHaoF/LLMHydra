@@ -47,14 +47,20 @@
           <div class="canvas-title canvas-title-empty" v-else>
             <span class="canvas-hint">请在左侧选择或新建一个配置组</span>
           </div>
-          <NodeCanvas
-            ref="canvasRef"
-            :chain="currentChainModels"
-            @reorder="onReorder"
-            @add-to-chain="onAddToChain"
-            @remove-from-chain="onRemoveFromChain"
-            @edit-model="openEditModel"
-          />
+          <div class="canvas-workspace">
+            <NodeCanvas
+              ref="canvasRef"
+              :chain="currentChainModels"
+              @reorder="onReorder"
+              @add-to-chain="onAddToChain"
+              @remove-from-chain="onRemoveFromChain"
+              @edit-model="openEditModel"
+            />
+            <LogPanel
+              :collapsed="logCollapsed"
+              @toggle="logCollapsed = !logCollapsed"
+            />
+          </div>
         </div>
       </div>
     </main>
@@ -73,7 +79,7 @@
         <div class="api-modal">
           <div class="api-modal-header">
             <h2>对外接口参考</h2>
-            <button class="api-close" @click="showApiRef = false">✕</button>
+            <button class="api-close" @click="showApiRef = false"><IconX :size="16" /></button>
           </div>
           <div class="api-modal-body">
             <ApiReference :proxy-port="port" />
@@ -95,11 +101,13 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import GroupList from './components/GroupList.vue'
 import ModelLibrary from './components/ModelLibrary.vue'
 import NodeCanvas from './components/NodeCanvas.vue'
+import LogPanel from './components/LogPanel.vue'
 import ModelEditorModal from './components/ModelEditorModal.vue'
 import ApiReference from './components/ApiReference.vue'
 import StatsModal from './components/StatsModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import api from './api.js'
+import { IconX } from '@tabler/icons-vue'
 
 // ---- 状态 ----
 const groups = ref([])
@@ -113,6 +121,7 @@ const showStats = ref(false)
 const showSettings = ref(false)
 const canvasRef = ref(null)
 const modelStats = ref([])
+const logCollapsed = ref(false)
 
 const editingModel = computed(() => {
   if (editingId.value === null) return null
@@ -365,7 +374,7 @@ function onSettingsSaved() {
 
 <style>
 .app {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   background: #f5f7fa;
@@ -422,6 +431,7 @@ function onSettingsSaved() {
   flex: 1;
   display: flex;
   overflow: hidden;
+  min-height: 0;
 }
 .left-panel {
   width: 260px;
@@ -434,6 +444,7 @@ function onSettingsSaved() {
 .right-panel {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -485,6 +496,12 @@ function onSettingsSaved() {
 }
 .canvas-title-empty {
   color: #909399;
+}
+.canvas-workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .api-overlay {

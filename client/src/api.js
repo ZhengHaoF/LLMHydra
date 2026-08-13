@@ -33,6 +33,10 @@ export default {
   // 重启
   restart: () => request('/restart', { method: 'POST' }),
 
+  // 日志
+  getLogs: () => request('/logs'),
+  clearLogs: () => request('/logs', { method: 'DELETE' }),
+
   // 统计
   getStatsOverview: () => request('/stats/overview'),
   getStatsModels: () => request('/stats/models'),
@@ -44,4 +48,8 @@ export default {
   // 设置
   getSettings: () => request('/settings'),
   updateSettings: (settings) => request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+
+  // 代理密钥
+  getProxyKey: () => request('/proxy-key'),
+  regenerateProxyKey: () => request('/proxy-key/regenerate', { method: 'POST' }),
 }

@@ -84,6 +84,8 @@ class StatsManager {
         COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
         COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
         COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        ROUND(AVG(latency_ms), 0) AS avg_latency_ms,
+        ROUND(100.0 * SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate,
         MAX(ts) AS last_used
       FROM requests
       GROUP BY model_id
@@ -100,7 +102,10 @@ class StatsManager {
         COUNT(*) AS total_requests,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
         SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) AS failure_count,
+        SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count,
         COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        ROUND(AVG(latency_ms), 0) AS avg_latency_ms,
+        ROUND(100.0 * SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate,
         MAX(ts) AS last_used
       FROM requests
       GROUP BY group_id
@@ -129,7 +134,11 @@ class StatsManager {
         strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day,
         model_id,
         COUNT(*) AS requests,
-        COALESCE(SUM(total_tokens), 0) AS total_tokens
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) AS failure_count,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        ROUND(AVG(latency_ms), 0) AS avg_latency_ms,
+        ROUND(100.0 * SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate
       FROM requests
       WHERE ts >= ?
       GROUP BY day, model_id
@@ -148,10 +157,12 @@ class StatsManager {
         COALESCE(SUM(total_tokens), 0) AS total_tokens,
         COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
         COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+        ROUND(AVG(latency_ms), 0) AS avg_latency_ms,
+        ROUND(100.0 * SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate,
         MAX(ts) AS last_used
       FROM requests
     `).get();
-    return row || { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, last_used: null };
+    return row || { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, avg_latency_ms: 0, success_rate: 0, last_used: null };
   }
 
   // 清空所有统计

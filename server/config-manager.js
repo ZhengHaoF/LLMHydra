@@ -29,6 +29,15 @@ const DEFAULT_SETTINGS = {
   circuit_breaker_duration_min: 5
 };
 
+function generateProxyKey() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let key = '';
+  for (let i = 0; i < 32; i++) {
+    key += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return key;
+}
+
 const DEFAULT_CONFIG = {
   port: 8093,
   settings: { ...DEFAULT_SETTINGS },
@@ -92,7 +101,8 @@ function normalizeSettings(s) {
     circuit_breaker_threshold: (s && typeof s.circuit_breaker_threshold === 'number' && s.circuit_breaker_threshold >= 1)
       ? s.circuit_breaker_threshold : DEFAULT_SETTINGS.circuit_breaker_threshold,
     circuit_breaker_duration_min: (s && typeof s.circuit_breaker_duration_min === 'number' && s.circuit_breaker_duration_min >= 1)
-      ? s.circuit_breaker_duration_min : DEFAULT_SETTINGS.circuit_breaker_duration_min
+      ? s.circuit_breaker_duration_min : DEFAULT_SETTINGS.circuit_breaker_duration_min,
+    proxy_key: (s && typeof s.proxy_key === 'string') ? s.proxy_key : ''
   };
 }
 
@@ -117,13 +127,20 @@ class ConfigManager {
           groups: Array.isArray(parsed.groups) ? parsed.groups.map(normalizeGroup) : [],
           models: Array.isArray(parsed.models) ? parsed.models.map(normalizeModel) : []
         };
+        // 如果没有 proxy_key，自动生成
+        if (!this._config.settings.proxy_key) {
+          this._config.settings.proxy_key = generateProxyKey();
+          this.save();
+        }
         this.save();
       } else {
         this._config = { ...DEFAULT_CONFIG };
+        this._config.settings.proxy_key = generateProxyKey();
         this.save();
       }
     } catch (e) {
       this._config = { ...DEFAULT_CONFIG };
+      this._config.settings.proxy_key = generateProxyKey();
     }
     return this._config;
   }
@@ -284,6 +301,18 @@ class ConfigManager {
     }
     this.save();
     return s;
+  }
+
+  getProxyKey() {
+    this._ensureConfig();
+    return this._config.settings.proxy_key;
+  }
+
+  regenerateProxyKey() {
+    this._ensureConfig();
+    this._config.settings.proxy_key = generateProxyKey();
+    this.save();
+    return this._config.settings.proxy_key;
   }
 }
 

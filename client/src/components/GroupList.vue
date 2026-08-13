@@ -26,8 +26,8 @@
         <div class="group-name">{{ g.name }}</div>
         <div class="group-meta">{{ g.chain.length }} 个节点</div>
         <div class="group-actions" @click.stop>
-          <button class="btn-icon" @click="openEditModal(g)" title="修改 ID / 名称">✎</button>
-          <button class="btn-icon danger" @click="pendingDelete = g.id" title="删除">✕</button>
+          <button class="btn-icon" @click="openEditModal(g)" title="修改 ID / 名称"><IconPencil :size="14" /></button>
+          <button class="btn-icon danger" @click="pendingDelete = g.id" title="删除"><IconX :size="14" /></button>
         </div>
       </div>
     </div>
@@ -71,7 +71,7 @@
                   :class="{ copied: editCopied }"
                   @click="copyEditId"
                   title="复制 ID"
-                >⧉ {{ editCopied ? '已复制' : '复制' }}</button>
+                ><IconCopy :size="13" /> {{ editCopied ? '已复制' : '复制' }}</button>
               </div>
               <div class="form-hint">仅允许中英文、数字和 -</div>
             </div>
@@ -107,6 +107,7 @@
 
 <script setup>
 import { ref, nextTick } from 'vue'
+import { IconPencil, IconX, IconCopy } from '@tabler/icons-vue'
 
 const props = defineProps({
   groups: { type: Array, default: () => [] },
@@ -396,6 +397,9 @@ async function copyText(text) {
   padding: 2px 6px;
   border-radius: 3px;
   font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .btn-icon:hover { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
 .btn-icon.danger:hover { color: #f56c6c; border-color: #fbc4c4; background: #fef0f0; }

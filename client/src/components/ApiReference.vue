@@ -1,5 +1,10 @@
 <template>
   <div class="api-reference">
+    <!-- Toast 提示 -->
+    <Transition name="toast">
+      <div v-if="toastVisible" class="toast">{{ toastMessage }}</div>
+    </Transition>
+
     <!-- 用户接入地址 -->
     <div class="hero-box">
       <div class="hero-label">AI 工具接入地址（复制下面地址填入工具的 Base URL）</div>
@@ -10,7 +15,24 @@
       <div class="hero-steps">
         <div class="step">① 在 AI 工具（Trae / Cursor / Cherry Studio 等）中找到 API Base URL 设置</div>
         <div class="step">② 填入 <code>http://localhost:{{ proxyPort }}</code>，不要加任何后缀路径</div>
-        <div class="step">③ 管理 API 和代理运行在同一端口上，/api/* 为管理接口，其他路径自动代理</div>
+        <div class="step">③ 在 Api Key 字段填入下方的代理密钥</div>
+        <div class="step">④ 管理 API 和代理运行在同一端口上，/api/* 为管理接口，其他路径自动代理</div>
+      </div>
+    </div>
+
+    <!-- 代理密钥 -->
+    <div class="api-section">
+      <div class="section-title">
+        <span class="badge badge-key">代理密钥</span>
+        <span class="section-port">必填</span>
+      </div>
+      <div class="key-box">
+        <div class="key-display">
+          <code class="key-value">{{ proxyKey }}</code>
+          <button class="btn-copy" @click="copyKey">复制</button>
+          <button class="btn-regenerate" @click="regenerateKey">重新生成</button>
+        </div>
+        <p class="key-note">AI 工具调用时必须提供此密钥，填在 Api Key 字段。密钥泄露后可点击"重新生成"。</p>
       </div>
     </div>
 
@@ -50,6 +72,7 @@
       <div class="code-block">
         <code>curl http://localhost:{{ proxyPort }}/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer {{ proxyKey }}" \
   -d '{"model":"deepseek-v4","messages":[{"role":"user","content":"你好"}],"stream":true}'</code>
       </div>
       <p class="proxy-note">所有非 /api/* 的请求自动代理到上游模型。支持 <code>/v1/chat/completions</code> 和 <code>/chat/completions</code> 两种路径写法。</p>
@@ -58,14 +81,65 @@
 </template>
 
 <script setup>
+import { ref, onMounted } from 'vue'
+import api from '../api.js'
+
 const props = defineProps({
   proxyPort: { type: Number, default: 8093 }
 })
 
+const proxyKey = ref('')
+const toastVisible = ref(false)
+const toastMessage = ref('')
+let toastTimer = null
+
+function showToast(message) {
+  if (toastTimer) clearTimeout(toastTimer)
+  toastMessage.value = message
+  toastVisible.value = true
+  toastTimer = setTimeout(() => {
+    toastVisible.value = false
+  }, 2000)
+}
+
+async function loadProxyKey() {
+  try {
+    const data = await api.getProxyKey()
+    proxyKey.value = data.proxy_key || ''
+  } catch (e) {
+    console.error('加载代理密钥失败:', e)
+  }
+}
+
 function copyUrl() {
   const url = `http://localhost:${props.proxyPort}`
-  navigator.clipboard.writeText(url).catch(() => {})
+  navigator.clipboard.writeText(url).then(() => {
+    showToast('已复制到剪贴板')
+  }).catch(() => {})
 }
+
+function copyKey() {
+  navigator.clipboard.writeText(proxyKey.value).then(() => {
+    showToast('已复制到剪贴板')
+  }).catch(() => {})
+}
+
+async function regenerateKey() {
+  if (!confirm('确定要重新生成代理密钥吗？旧的密钥将立即失效，所有使用旧密钥的 AI 工具都需要更新。')) {
+    return
+  }
+  try {
+    const data = await api.regenerateProxyKey()
+    proxyKey.value = data.proxy_key || ''
+    showToast('密钥已重新生成')
+  } catch (e) {
+    console.error('重新生成代理密钥失败:', e)
+  }
+}
+
+onMounted(() => {
+  loadProxyKey()
+})
 
 const apiEndpoints = [
   { id: 1,  method: 'GET',    path: '/api/models',                 desc: '获取所有模型配置' },
@@ -81,6 +155,32 @@ const apiEndpoints = [
 <style scoped>
 .api-reference {
   padding: 24px 24px 20px;
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #67c23a;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 4px;
+  font-size: 14px;
+  z-index: 9999;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-20px);
 }
 
 /* ---- 接入地址 ---- */
@@ -163,6 +263,50 @@ const apiEndpoints = [
 }
 .badge-api   { background: #ecf5ff; color: #409eff; }
 .badge-proxy { background: #e8f5e9; color: #4caf50; }
+.badge-key   { background: #fff3e0; color: #f57c00; }
+
+/* ---- 代理密钥 ---- */
+.key-box {
+  background: #fafafa;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 16px;
+}
+.key-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.key-value {
+  flex: 1;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  background: #fff;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #dcdfe6;
+  word-break: break-all;
+}
+.btn-regenerate {
+  padding: 6px 14px;
+  background: #f56c6c;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.btn-regenerate:hover { background: #f78989; }
+.key-note {
+  font-size: 12px;
+  color: #909399;
+  margin: 0;
+  line-height: 1.6;
+}
 
 /* ---- 表格 ---- */
 .table-wrap {

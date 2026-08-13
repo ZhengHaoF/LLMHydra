@@ -1,5 +1,15 @@
 <template>
-  <div class="node-canvas" @dragover.prevent @drop="onDropToCanvas">
+  <div
+    class="node-canvas"
+    :class="{ panning: isPanning }"
+    ref="canvasEl"
+    @dragover.prevent
+    @drop="onDropToCanvas"
+    @wheel.prevent="onWheel"
+    @mousedown="onCanvasMouseDown"
+  >
+    <!-- 缩放指示器 -->
+    <div class="zoom-indicator">{{ Math.round(scale * 100) }}%</div>
     <!-- 全局 SVG defs：箭头标记 -->
     <svg style="position:absolute;width:0;height:0" aria-hidden="true">
       <defs>
@@ -9,7 +19,12 @@
       </defs>
     </svg>
 
-    <div class="canvas-inner">
+    <div
+      class="canvas-inner"
+      :class="{ panning: isPanning }"
+      ref="canvasInnerRef"
+      :style="{ transform: `translate(${panX}px, ${panY}px) scale(${scale})` }"
+    >
       <!-- 入口节点（固定） -->
       <div class="port-node port-in">
         <div class="port-dot"></div>
@@ -47,7 +62,7 @@
             class="node-remove"
             @click.stop="$emit('remove-from-chain', model.id)"
             title="从链中移除"
-          >✕</button>
+          ><IconX :size="14" /></button>
         </div>
 
         <!-- 节点之间的连线（仅在节点之间插入） -->
@@ -108,11 +123,91 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { IconX } from '@tabler/icons-vue'
 
 const props = defineProps({
   chain: { type: Array, default: () => [] } // [{ id, name, endpoints: [...] }]
 })
+
+const scale = ref(1)
+const panX = ref(0)
+const panY = ref(0)
+const isPanning = ref(false)
+
+const canvasEl = ref(null)
+const canvasInnerRef = ref(null)
+
+// 视口居中：把画布内容放到容器中间
+function centerCanvas() {
+  nextTick(() => {
+    const el = canvasInnerRef.value
+    const parent = canvasEl.value
+    if (!el || !parent) return
+    panX.value = (parent.clientWidth - el.offsetWidth) / 2
+    panY.value = (parent.clientHeight - el.offsetHeight) / 2
+  })
+}
+
+onMounted(() => {
+  centerCanvas()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('mousemove', onCanvasMouseMove)
+  window.removeEventListener('mouseup', onCanvasMouseUp)
+})
+
+// 链长度变化（增删节点）时重新居中，保证新内容可见
+watch(() => props.chain.length, () => {
+  centerCanvas()
+})
+
+// 滚轮缩放：以鼠标所在位置为缩放中心
+function onWheel(e) {
+  const rect = canvasEl.value.getBoundingClientRect()
+  const mouseX = e.clientX - rect.left
+  const mouseY = e.clientY - rect.top
+  const oldScale = scale.value
+  const delta = e.deltaY > 0 ? -0.1 : 0.1
+  const newScale = Math.max(0.5, Math.min(2, oldScale + delta))
+  if (newScale === oldScale) return
+  // 保持鼠标指向的内容点不动
+  panX.value = mouseX - ((mouseX - panX.value) * newScale) / oldScale
+  panY.value = mouseY - ((mouseY - panY.value) * newScale) / oldScale
+  scale.value = newScale
+}
+
+let panStartX = 0
+let panStartY = 0
+let panOriginX = 0
+let panOriginY = 0
+
+// 空白处按下启动平移（节点上交给 HTML5 DnD 处理排序）
+function onCanvasMouseDown(e) {
+  if (e.button !== 0) return
+  if (e.target.closest('.model-node') || e.target.closest('.port-node')) return
+  e.preventDefault()
+  isPanning.value = true
+  panStartX = e.clientX
+  panStartY = e.clientY
+  panOriginX = panX.value
+  panOriginY = panY.value
+  window.addEventListener('mousemove', onCanvasMouseMove)
+  window.addEventListener('mouseup', onCanvasMouseUp)
+}
+
+function onCanvasMouseMove(e) {
+  if (!isPanning.value) return
+  panX.value = panOriginX + (e.clientX - panStartX)
+  panY.value = panOriginY + (e.clientY - panStartY)
+}
+
+function onCanvasMouseUp() {
+  isPanning.value = false
+  window.removeEventListener('mousemove', onCanvasMouseMove)
+  window.removeEventListener('mouseup', onCanvasMouseUp)
+}
 
 const emit = defineEmits([
   'reorder',         // (fromIdx, toIdx) — 在画布内交换顺序
@@ -187,18 +282,29 @@ defineExpose({
   background-image:
     radial-gradient(circle at 1px 1px, rgba(0,0,0,0.06) 1px, transparent 0);
   background-size: 20px 20px;
-  overflow: auto;
-  padding: 40px 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
+  position: relative;
+  cursor: grab;
+  user-select: none;
   min-height: 360px;
 }
+.node-canvas.panning {
+  cursor: grabbing;
+}
 .canvas-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
   display: flex;
   align-items: center;
   gap: 0;
   flex-wrap: nowrap;
+  transform-origin: 0 0;
+  transition: transform 0.15s ease-out;
+  will-change: transform;
+}
+.canvas-inner.panning {
+  transition: none;
 }
 
 /* ---- 端口节点（入口 / 出口） ---- */
@@ -368,5 +474,21 @@ defineExpose({
   text-align: center;
   padding: 0 12px;
   background: rgba(255,255,255,0.5);
+}
+
+/* ---- 缩放指示器 ---- */
+.zoom-indicator {
+  position: absolute;
+  bottom: 12px;
+  right: 16px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 10;
+  backdrop-filter: blur(8px);
 }
 </style>

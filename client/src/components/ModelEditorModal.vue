@@ -4,7 +4,7 @@
       <div class="modal-box">
         <div class="modal-header">
           <h2>{{ isNew ? '新增模型' : '编辑模型' }}</h2>
-          <button class="modal-close" @click="$emit('cancel')">✕</button>
+          <button class="modal-close" @click="$emit('cancel')"><IconX :size="16" /></button>
         </div>
         <div class="modal-body">
           <ModelEditor
@@ -21,6 +21,7 @@
 
 <script setup>
 import ModelEditor from './ModelEditor.vue'
+import { IconX } from '@tabler/icons-vue'
 
 defineProps({
   model: { type: Object, default: null },

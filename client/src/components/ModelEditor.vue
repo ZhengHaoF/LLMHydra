@@ -57,7 +57,7 @@
         <div class="test-result-box">
           <div class="test-result-header">
             <h3>测试结果</h3>
-            <button class="modal-close" @click="showTestResult = false">✕</button>
+            <button class="modal-close" @click="showTestResult = false"><IconX :size="16" /></button>
           </div>
           <div class="test-result-body">
             <div class="test-status" :class="testResult.success ? 'success' : 'fail'">
@@ -87,6 +87,7 @@
 
 <script setup>
 import { reactive, watch, ref } from 'vue'
+import { IconX } from '@tabler/icons-vue'
 
 const props = defineProps({
   model: { type: Object, default: () => ({}) },
@@ -346,6 +347,16 @@ function formatResponse(val) {
   background: #fafafa;
 }
 .test-result-header h3 { font-size: 15px; font-weight: 600; color: #303133; }
+.test-result-header .modal-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  color: #909399;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.test-result-header .modal-close:hover { color: #303133; background: #f0f0f0; }
 .test-result-body { padding: 20px; overflow-y: auto; }
 .test-status {
   display: flex;

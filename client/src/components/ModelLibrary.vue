@@ -26,7 +26,7 @@
           <span v-else-if="isInOtherChain(m.id)" class="badge other-chain">其他组</span>
           <span v-if="getStats(m.id)" class="badge stats">{{ getStats(m.id) }}</span>
         </div>
-        <button class="lib-del" @click.stop="pendingDelete = m.id" title="删除模型">✕</button>
+        <button class="lib-del" @click.stop="pendingDelete = m.id" title="删除模型"><IconX :size="13" /></button>
       </div>
     </div>
 
@@ -50,6 +50,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import { IconX } from '@tabler/icons-vue'
 
 const props = defineProps({
   models: { type: Array, default: () => [] },

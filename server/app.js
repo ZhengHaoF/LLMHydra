@@ -9,10 +9,18 @@ const { spawn } = require('child_process');
 const { isValidGroupId } = require('./config-manager');
 const CircuitBreaker = require('./circuit-breaker');
 const statsManager = require('./stats-manager');
+const logManager = require('./log-manager');
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19);
   console.log(`[${ts}] ${msg}`);
+  logManager.append(msg);
+}
+
+// 记录统计并广播统计更新事件（前端通过 SSE 收到后自动刷新）
+function recordStats(entry) {
+  statsManager.recordRequest(entry);
+  logManager.broadcast({ type: 'stats', ts: Date.now() });
 }
 
 // ---- 工具 ----
@@ -27,45 +35,10 @@ function readBody(req) {
 }
 
 function transformDeltaContent(delta) {
-  let count = 0;
-  if (delta.content && Array.isArray(delta.content)) {
-    const nc = [];
-    for (const block of delta.content) {
-      if (block.type === 'thinking' || block.type === 'redacted_thinking') {
-        nc.push({ type: 'text', text: block.thinking || block.data || '' });
-        count++;
-      } else {
-        nc.push(block);
-      }
-    }
-    delta.content = nc;
-    return { count, delta };
-  }
-  if (delta.reasoning_content) {
-    const r = delta.reasoning_content;
-    delete delta.reasoning_content;
-    delta.content = (delta.content || '') + r;
-    count++;
-    return { count, delta };
-  }
   return null;
 }
 
 function transformMessageContent(message) {
-  let count = 0;
-  if (message.content && Array.isArray(message.content)) {
-    const nc = [];
-    for (const block of message.content) {
-      if (block.type === 'thinking' || block.type === 'redacted_thinking') {
-        nc.push({ type: 'text', text: block.thinking || block.data || '' });
-        count++;
-      } else {
-        nc.push(block);
-      }
-    }
-    message.content = nc;
-    return { count, message };
-  }
   return null;
 }
 
@@ -159,6 +132,15 @@ function createProxyMiddleware(configManager, circuitBreaker) {
   return async function proxyMiddleware(req, res) {
     if (req.path.startsWith('/api')) return;
 
+    // 代理密钥校验（在 readBody 之前，省资源）
+    const settings = configManager.getSettings();
+    const auth = req.headers['authorization'] || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    if (!token || token !== settings.proxy_key) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Invalid proxy key' }));
+    }
+
     // 读 body 取 model 字段
     let rawBody;
     try {
@@ -222,7 +204,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         const state = circuitBreaker.states.get(model.id);
         const until = state ? new Date(state.circuitOpenUntil).toISOString() : '';
         log(`[SKIP]  model #${i + 1} (${model.display_name}) — circuit breaker open until ${until}`);
-        statsManager.recordRequest({
+        recordStats({
           group_id: groupId,
           model_id: model.id,
           model_display: model.display_name,
@@ -255,6 +237,13 @@ function createProxyMiddleware(configManager, circuitBreaker) {
           json.thinking = { type: 'enabled' };
           if (userBudget) json.thinking.budget_tokens = userBudget;
           json.reasoning_effort = model.effort || 'medium';
+          if (Array.isArray(json.messages)) {
+            for (const msg of json.messages) {
+              if (msg.role === 'assistant' && typeof msg.reasoning_content !== 'string') {
+                msg.reasoning_content = '';
+              }
+            }
+          }
           body = JSON.stringify(json);
         } catch (e) { /* pass through */ }
       }
@@ -279,7 +268,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         const relayResult = await relayUpstream(result.upstreamRes, res, isStream);
         const latency = Date.now() - modelStart;
         const usage = relayResult && relayResult.usage ? relayResult.usage : null;
-        statsManager.recordRequest({
+        recordStats({
           group_id: groupId,
           model_id: model.id,
           model_display: model.display_name,
@@ -306,7 +295,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
           payload = { error: result.body || result.reason || 'upstream 4xx' };
         }
         res.end(JSON.stringify(payload));
-        statsManager.recordRequest({
+        recordStats({
           group_id: groupId,
           model_id: model.id,
           model_display: model.display_name,
@@ -321,7 +310,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
 
       circuitBreaker.recordFailure(model.id);
       log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} ${result.reason || ''} — try next.`);
-      statsManager.recordRequest({
+      recordStats({
         group_id: groupId,
         model_id: model.id,
         model_display: model.display_name,
@@ -585,6 +574,32 @@ function createApp(configManager) {
     res.json({ success: true });
   });
 
+  // ---- 日志 ----
+  api.get('/logs', (req, res) => {
+    res.json({ logs: logManager.getRecent() });
+  });
+
+  api.get('/logs/stream', (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    res.write('event: ready\ndata: {}\n\n');
+    const unsubscribe = logManager.subscribe(res);
+    const ping = setInterval(() => res.write(': ping\n\n'), 30000);
+    req.on('close', () => {
+      clearInterval(ping);
+      unsubscribe();
+    });
+  });
+
+  api.delete('/logs', (req, res) => {
+    logManager.clear();
+    res.json({ success: true });
+  });
+
   // ---- 设置 ----
   api.get('/settings', (req, res) => {
     res.json(configManager.getSettings());
@@ -598,6 +613,16 @@ function createApp(configManager) {
       durationMs: s.circuit_breaker_duration_min * 60 * 1000
     });
     res.json({ success: true, settings: s });
+  });
+
+  // ---- 代理密钥 ----
+  api.get('/proxy-key', (req, res) => {
+    res.json({ proxy_key: configManager.getProxyKey() });
+  });
+
+  api.post('/proxy-key/regenerate', (req, res) => {
+    const newKey = configManager.regenerateProxyKey();
+    res.json({ success: true, proxy_key: newKey });
   });
 
   // ---- 测试模型端点 ----
