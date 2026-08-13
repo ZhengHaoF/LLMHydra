@@ -1,7 +1,6 @@
 // app.js — 单端口 Express：管理 API (/api/*) + HTTP 代理 (/*)
 
 const express = require('express');
-const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const http = require('http');
@@ -490,23 +489,6 @@ function createApp(configManager) {
     crossOriginEmbedderPolicy: false
   }));
 
-  // CORS 白名单
-  const allowedOrigins = process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
-    : ['http://localhost:5173', 'http://localhost:8093'];
-
-  app.use(cors({
-    origin: (origin, callback) => {
-      // 允许无 origin（同源请求、curl、Postman）
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    credentials: true
-  }));
-
   // 管理 API 限流
   const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,  // 15 分钟
@@ -549,9 +531,9 @@ function createApp(configManager) {
   api.use(adminAuth);
   api.use(express.json({ limit: '10mb' }));
 
-  // 整体配置（脱敏）
+  // 整体配置（管理 API 已有 admin 鉴权，无需脱敏）
   api.get('/config', (req, res) => {
-    res.json(configManager.getConfigSanitized());
+    res.json(configManager.getConfig());
   });
 
   // ---- 配置组 ----

@@ -9,12 +9,12 @@
     <div class="hero-box">
       <div class="hero-label">AI 工具接入地址（复制下面地址填入工具的 Base URL）</div>
       <div class="hero-url-row">
-        <code class="hero-url">http://localhost:{{ proxyPort }}</code>
+        <code class="hero-url">{{ baseUrl }}</code>
         <button class="btn-copy" @click="copyUrl">复制</button>
       </div>
       <div class="hero-steps">
         <div class="step">① 在 AI 工具（Trae / Cursor / Cherry Studio 等）中找到 API Base URL 设置</div>
-        <div class="step">② 填入 <code>http://localhost:{{ proxyPort }}</code>，不要加任何后缀路径</div>
+        <div class="step">② 填入 <code>{{ baseUrl }}</code>，不要加任何后缀路径</div>
         <div class="step">③ 在 Api Key 字段填入下方的代理密钥</div>
         <div class="step">④ 管理 API 和代理运行在同一端口上，/api/* 为管理接口，其他路径自动代理</div>
       </div>
@@ -40,7 +40,7 @@
     <div class="api-section">
       <div class="section-title">
         <span class="badge badge-api">管理 API</span>
-        <span class="section-port">localhost:{{ proxyPort }}/api</span>
+        <span class="section-port">{{ baseUrl }}/api</span>
       </div>
 
       <div class="table-wrap">
@@ -70,7 +70,7 @@
         <span class="section-port">/v1/chat/completions</span>
       </div>
       <div class="code-block">
-        <code>curl http://localhost:{{ proxyPort }}/v1/chat/completions \
+        <code>curl {{ baseUrl }}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer {{ proxyKey }}" \
   -d '{"model":"deepseek-v4","messages":[{"role":"user","content":"你好"}],"stream":true}'</code>
@@ -83,10 +83,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import api from '../api.js'
-
-const props = defineProps({
-  proxyPort: { type: Number, default: 8093 }
-})
 
 const proxyKey = ref('')
 const toastVisible = ref(false)

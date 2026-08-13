@@ -88,6 +88,7 @@
 <script setup>
 import { reactive, watch, ref } from 'vue'
 import { IconX } from '@tabler/icons-vue'
+import api from '../api.js'
 
 const props = defineProps({
   model: { type: Object, default: () => ({}) },
@@ -165,19 +166,14 @@ async function handleTest() {
   showTestResult.value = false;
 
   try {
-    const res = await fetch('/api/models/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        endpoint: { url, api_key: (form.endpoint.api_key || '').trim() },
-        model_id: form.model_id.trim(),
-        thinking_enabled: form.thinking_enabled,
-        effort: form.effort,
-        ssl_verify: form.ssl_verify,
-        endpoint_timeout: form.endpoint_timeout
-      })
+    const data = await api.testModel({
+      endpoint: { url, api_key: (form.endpoint.api_key || '').trim() },
+      model_id: form.model_id.trim(),
+      thinking_enabled: form.thinking_enabled,
+      effort: form.effort,
+      ssl_verify: form.ssl_verify,
+      endpoint_timeout: form.endpoint_timeout
     });
-    const data = await res.json();
     testResult.value = data;
   } catch (err) {
     testResult.value = { success: false, status: 0, response: null, error: err.message };

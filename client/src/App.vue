@@ -107,7 +107,7 @@
             <button class="api-close" @click="showApiRef = false"><IconX :size="16" /></button>
           </div>
           <div class="api-modal-body">
-            <ApiReference :proxy-port="port" />
+            <ApiReference />
           </div>
         </div>
       </div>

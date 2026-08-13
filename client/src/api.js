@@ -93,4 +93,7 @@ export default {
   // 代理密钥
   getProxyKey: () => request('/proxy-key'),
   regenerateProxyKey: () => request('/proxy-key/regenerate', { method: 'POST' }),
+
+  // 测试模型端点
+  testModel: (data) => request('/models/test', { method: 'POST', body: JSON.stringify(data) }),
 }
