@@ -28,9 +28,11 @@
         </svg>
         <div
           class="model-node"
+          :class="{ 'drop-before': dragOverIdx === idx && dragSource?.type === 'library' }"
           draggable="true"
           @dragstart="onNodeDragStart($event, idx)"
           @dragover.prevent="onNodeDragOver($event, idx)"
+          @dragleave="onNodeDragLeave(idx)"
           @drop.stop="onNodeDrop($event, idx)"
           @click="$emit('edit-model', model.id)"
           :title="`点击编辑 · ${model.display_name || model.name}`"
@@ -58,6 +60,15 @@
         </svg>
       </template>
 
+      <!-- 链为空时，入口 → 空槽位的虚线连线 -->
+      <svg
+        v-if="chain.length === 0"
+        class="wire-between empty-wire"
+        width="60" height="120"
+      >
+        <line x1="0" y1="60" x2="60" y2="60" stroke="#c0c4cc" stroke-width="2.5" stroke-dasharray="6,4" />
+      </svg>
+
       <!-- 空槽位提示 -->
       <div
         v-if="chain.length === 0"
@@ -68,10 +79,10 @@
         从上方拖拽模型到此处构建链路
       </div>
 
-      <!-- 链为空时，入口→出口之间也有一条连线 -->
+      <!-- 链为空时，空槽位 → 出口的虚线连线 -->
       <svg
         v-if="chain.length === 0"
-        class="wire-between"
+        class="wire-between empty-wire"
         width="60" height="120"
       >
         <line x1="0" y1="60" x2="60" y2="60" stroke="#c0c4cc" stroke-width="2.5" stroke-dasharray="6,4" />
@@ -105,12 +116,13 @@ const props = defineProps({
 
 const emit = defineEmits([
   'reorder',         // (fromIdx, toIdx) — 在画布内交换顺序
-  'add-to-chain',    // (modelId) — 从模型库拖入
+  'add-to-chain',    // (modelId, targetIdx?) — 从模型库拖入，可指定插入位置
   'remove-from-chain', // (modelId) — 移除节点
   'edit-model'       // (modelId)
 ])
 
 const dragSource = ref(null) // { type: 'canvas', idx } | { type: 'library', modelId } | null
+const dragOverIdx = ref(null) // 拖拽悬停的节点索引（用于视觉反馈）
 
 function endpointHost(endpoint) {
   if (!endpoint || !endpoint.url) return '无端点';
@@ -129,7 +141,14 @@ function onNodeDragStart(e, idx) {
 
 function onNodeDragOver(e, idx) {
   if (!dragSource.value) return
-  e.dataTransfer.dropEffect = 'move'
+  e.dataTransfer.dropEffect = dragSource.value.type === 'library' ? 'copy' : 'move'
+  dragOverIdx.value = idx
+}
+
+function onNodeDragLeave(idx) {
+  if (dragOverIdx.value === idx) {
+    dragOverIdx.value = null
+  }
 }
 
 function onNodeDrop(e, targetIdx) {
@@ -138,9 +157,10 @@ function onNodeDrop(e, targetIdx) {
   if (src.type === 'canvas' && src.idx !== targetIdx) {
     emit('reorder', src.idx, targetIdx)
   } else if (src.type === 'library') {
-    emit('add-to-chain', src.modelId)
+    emit('add-to-chain', src.modelId, targetIdx)
   }
   dragSource.value = null
+  dragOverIdx.value = null
 }
 
 function onDropToCanvas(e) {
@@ -149,6 +169,7 @@ function onDropToCanvas(e) {
     emit('add-to-chain', src.modelId)
   }
   dragSource.value = null
+  dragOverIdx.value = null
 }
 
 // 暴露给 ModelLibrary 用：开始拖模型库中的模型
@@ -241,6 +262,24 @@ defineExpose({
   box-shadow: 0 6px 16px rgba(64,158,255,0.25);
 }
 .model-node:active { cursor: grabbing; }
+
+/* 拖拽插入指示器：左侧高亮条 */
+.model-node.drop-before {
+  border-color: #67c23a;
+  box-shadow: 0 6px 16px rgba(103,194,58,0.3);
+}
+.model-node.drop-before::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: -4px;
+  bottom: -4px;
+  width: 4px;
+  background: #67c23a;
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(103,194,58,0.6);
+  z-index: 3;
+}
 .node-handle {
   position: absolute;
   top: 4px;

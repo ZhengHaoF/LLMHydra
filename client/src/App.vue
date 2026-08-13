@@ -318,11 +318,16 @@ async function onReorder(fromIdx, toIdx) {
   }
 }
 
-async function onAddToChain(modelId) {
+async function onAddToChain(modelId, targetIdx) {
   const g = activeGroup.value
   if (!g) return
   if (g.chain.includes(modelId)) return
-  const newChain = [...g.chain, modelId]
+  const newChain = [...g.chain]
+  if (typeof targetIdx === 'number' && targetIdx >= 0 && targetIdx <= newChain.length) {
+    newChain.splice(targetIdx, 0, modelId)
+  } else {
+    newChain.push(modelId)
+  }
   try {
     await api.updateGroup(g.id, { chain: newChain })
     await loadData()

@@ -26,7 +26,6 @@
         <div class="group-name">{{ g.name }}</div>
         <div class="group-meta">{{ g.chain.length }} 个节点</div>
         <div class="group-actions" @click.stop>
-          <button class="btn-icon copy" @click="copyId(g.id)" :class="{ copied: copiedId === g.id }" title="复制 ID">⧉</button>
           <button class="btn-icon" @click="openEditModal(g)" title="修改 ID / 名称">✎</button>
           <button class="btn-icon danger" @click="pendingDelete = g.id" title="删除">✕</button>
         </div>
@@ -211,16 +210,7 @@ async function copyEditId() {
   }
 }
 
-// 行内复制（hover 按钮）
-const copiedId = ref(null)
 
-async function copyId(id) {
-  const ok = await copyText(id)
-  if (ok) {
-    copiedId.value = id
-    setTimeout(() => { copiedId.value = null }, 1200)
-  }
-}
 
 async function copyText(text) {
   try {
@@ -376,15 +366,7 @@ async function copyText(text) {
   color: #67c23a;
   border-color: #b3e19d;
 }
-.btn-icon.copy {
-  font-size: 13px;
-  letter-spacing: 0;
-}
-.btn-icon.copy.copied {
-  color: #67c23a;
-  border-color: #b3e19d;
-  background: #e1f3d8;
-}
+
 .group-meta {
   font-size: 11px;
   color: #c0c4cc;
