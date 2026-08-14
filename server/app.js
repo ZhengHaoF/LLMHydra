@@ -256,7 +256,21 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       }
 
       // 用第一个模型的 endpoint URL 作为基准
-      const upstreamUrl = new URL(model.endpoint.url);
+      let upstreamUrl;
+      try {
+        upstreamUrl = new URL(model.endpoint.url);
+      } catch (e) {
+        log(`[FAIL]  model #${i + 1} (${model.display_name}) — 无效端点 URL，跳过`);
+        recordStats({
+          group_id: groupId,
+          model_id: model.id,
+          model_display: model.display_name,
+          path: pathNoQuery,
+          status: 'failure',
+          error: 'invalid endpoint url'
+        });
+        continue;
+      }
       const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + pathNoQuery + query;
 
       // 替换 model 字段为实际的 model_id
@@ -719,7 +733,12 @@ function createApp(configManager) {
       return res.status(400).json({ error: '缺少模型 ID' });
     }
 
-    const upstreamUrl = new URL(endpoint.url);
+    let upstreamUrl;
+    try {
+      upstreamUrl = new URL(endpoint.url);
+    } catch (e) {
+      return res.status(400).json({ error: '无效的端点 URL' });
+    }
     const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + '/chat/completions';
     const proto = upstreamUrl.protocol === 'https:' ? https : http;
     const apiKey = (endpoint.api_key || '').trim();
@@ -888,6 +907,13 @@ function createApp(configManager) {
         res.status(404).json({ error: 'Not found' });
       }
     });
+  });
+
+  // 统一错误处理：任何未捕获异常都返回 JSON，避免前端拿到 HTML 错误页
+  app.use((err, req, res, next) => {
+    console.error('[ERROR]', err);
+    if (res.headersSent) return next(err);
+    res.status(err.status || err.statusCode || 500).json({ error: err.message || 'Internal Server Error' });
   });
 
   return app;

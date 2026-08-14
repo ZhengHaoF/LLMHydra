@@ -168,6 +168,8 @@ curl http://localhost:8093/v1/chat/completions \
 
 每次代理请求（含成功/失败/熔断跳过）都会写入 `stats.db`（SQLite WAL 模式），提供以下维度查询：
 
+> 统计库默认在应用根目录 `stats.db`。若部署目录只读（如 PaaS），服务会自动回退到系统临时目录以保证统计可用，也可通过环境变量 `STATS_DB_PATH` 指定可写位置；统计不可用时仅降级，不影响代理主流程。
+
 | 维度 | API | 用途 |
 |---|---|---|
 | 总览 | `GET /api/stats/overview` | 总请求数、成功率、平均延迟、Token 总量 |
