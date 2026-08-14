@@ -15,10 +15,7 @@ async function main() {
   const port = config.port || 8093;
   const adminPassword = configManager.getAdminPassword();
 
-  console.log(`配置加载完成: ${config.models.length} 个模型`);
-  if (config.models.length > 0) {
-    console.log(`当前模型: ${config.models[config.selected_index]?.name || '无'}`);
-  }
+  console.log(`配置加载完成: ${config.models.length} 个模型, ${config.groups.length} 个配置组`);
 
   const app = createApp(configManager);
 

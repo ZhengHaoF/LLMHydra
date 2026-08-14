@@ -127,7 +127,7 @@ curl http://localhost:8093/v1/chat/completions \
   -d '{"model":"deepseek-v4","messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
 
-支持 `/v1/chat/completions` 与 `/chat/completions` 两种路径（服务端会自动剥离 `/v1` 前缀）；所有非 `/api/*` 的请求自动代理到上游。
+支持 `/v1/chat/completions`、`/v1/embeddings`、`/v1/responses`、`/v1/completions` 等路径（也兼容不带 `/v1` 前缀的写法，服务端自动剥离 `/v1`）；`GET /v1/models` 返回全部配置组 ID 列表（OpenAI 兼容格式），供工具探测可用模型。所有非 `/api/*` 的请求自动代理到上游。
 
 ## 🔑 故障转移规则
 

@@ -4,13 +4,21 @@
       <h3>模型库</h3>
       <span class="lib-hint">拖到下方画布构建链路</span>
       <div class="lib-spacer"></div>
+      <input
+        v-model="filter"
+        class="lib-search"
+        type="text"
+        placeholder="搜索模型..."
+        title="按名称 / 模型 ID / 域名过滤"
+      />
       <button class="btn-add" @click="$emit('add')">+ 新增模型</button>
     </div>
 
     <div class="lib-body">
       <div v-if="models.length === 0" class="empty">暂无模型，点击右上角新增</div>
+      <div v-else-if="filteredModels.length === 0" class="empty">没有匹配「{{ filter.trim() }}」的模型</div>
       <div
-        v-for="m in models"
+        v-for="m in filteredModels"
         :key="m.id"
         class="lib-item"
         :class="{ inChain: isInAnyChain(m.id) }"
@@ -49,7 +57,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { IconX } from '@tabler/icons-vue'
 
 const props = defineProps({
@@ -62,6 +70,17 @@ const props = defineProps({
 const emit = defineEmits(['add', 'edit', 'delete'])
 
 const pendingDelete = ref(null)
+
+// 搜索过滤：按显示名 / 模型 ID / 端点域名匹配
+const filter = ref('')
+const filteredModels = computed(() => {
+  const q = filter.value.trim().toLowerCase()
+  if (!q) return props.models
+  return props.models.filter((m) => {
+    const hay = `${m.display_name || ''} ${m.model_id || ''} ${endpointHost(m.endpoint)}`.toLowerCase()
+    return hay.includes(q)
+  })
+})
 
 function onDragStart(e, modelId) {
   // 在 dataTransfer 里设一个标记，NodeCanvas 会读 dragstart 事件上的组件 ref
@@ -136,6 +155,19 @@ function confirmDelete() {
 .lib-header h3 { font-size: 14px; font-weight: 600; color: #303133; }
 .lib-hint { font-size: 11px; color: #909399; }
 .lib-spacer { flex: 1; }
+.lib-search {
+  width: 170px;
+  padding: 5px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+.lib-search:focus {
+  border-color: #409eff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.12);
+}
 .btn-add {
   background: #409eff;
   color: #fff;

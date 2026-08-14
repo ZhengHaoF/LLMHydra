@@ -5,6 +5,9 @@ const fs = require('fs');
 
 const DB_FILE = path.join(__dirname, '..', 'stats.db');
 
+// 自动保留天数：超过该天数的请求明细在服务启动后首次访问时清理，避免 stats.db 无限增长
+const RETENTION_DAYS = 90;
+
 class StatsManager {
   constructor() {
     this.db = null;
@@ -36,6 +39,13 @@ class StatsManager {
       CREATE INDEX IF NOT EXISTS idx_req_group ON requests(group_id);
       CREATE INDEX IF NOT EXISTS idx_req_status ON requests(status);
     `);
+
+    // 自动保留：清理超过保留期的历史明细
+    try {
+      this.db.prepare('DELETE FROM requests WHERE ts < ?').run(Date.now() - RETENTION_DAYS * 86400 * 1000);
+    } catch (e) {
+      console.error('[stats] retention cleanup failed:', e.message);
+    }
 
     this._stmtInsert = this.db.prepare(`
       INSERT INTO requests (ts, group_id, model_id, model_display, path, status, status_code,
@@ -131,7 +141,7 @@ class StatsManager {
     const since = Date.now() - days * 86400 * 1000;
     return this.db.prepare(`
       SELECT
-        strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day,
+        strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') AS day,
         model_id,
         COUNT(*) AS requests,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,

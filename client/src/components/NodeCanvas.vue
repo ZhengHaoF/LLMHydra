@@ -145,7 +145,8 @@
           class="drop-ghost"
           :style="{ transform: `translateX(${ghostX}px)` }"
         >
-          <IconPlus :size="28" />
+          <IconPlus :size="26" />
+          <span v-if="ghostModelName" class="drop-ghost-name">{{ ghostModelName }}</span>
         </div>
       </Transition>
     </div>
@@ -157,7 +158,8 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { IconX, IconPlus } from '@tabler/icons-vue'
 
 const props = defineProps({
-  chain: { type: Array, default: () => [] } // [{ id, name, endpoints: [...] }]
+  chain: { type: Array, default: () => [] }, // [{ id, name, endpoints: [...] }]
+  models: { type: Array, default: () => [] } // 模型库（用于幽灵显示被拖模型的名称）
 })
 
 const scale = ref(1)
@@ -303,13 +305,33 @@ const showGhost = computed(() => {
   return !!dragSource.value && dragOverIdx.value !== null && props.chain.length > 0 && ghostX.value !== null
 })
 
+// 幽灵上显示被拖模型的名称（仅模型库拖入；链内重排不显示）
+const ghostModelName = computed(() => {
+  if (!dragSource.value || dragSource.value.type !== 'library') return ''
+  const m = props.models.find((x) => x.id === dragSource.value.modelId)
+  return m ? (m.display_name || m.model_id || '') : ''
+})
+
 // 画布空白处 dragover：按坐标算出最近的插入间隙。
 // 节点 / 连线上的悬停由各自的 handler 设置精确下标，这里只处理空白区。
 function onCanvasDragOver(e) {
   if (!dragSource.value) return
   if (e.target.closest('.model-node') || e.target.closest('.wire-between')) return
   e.dataTransfer.dropEffect = dragSource.value.type === 'library' ? 'copy' : 'move'
+  if (dragSource.value.type === 'canvas' && !isInsideChainRow(e.clientX)) {
+    // 链内节点拖出链行范围 → 表示"移除"，不显示插入幽灵
+    dragOverIdx.value = null
+    return
+  }
   dragOverIdx.value = computeInsertIndex(e.clientX)
+}
+
+// 判断 x 坐标是否落在链内容水平范围内（含 60px 容差），用于区分"重排"与"拖出删除"
+function isInsideChainRow(clientX) {
+  const inner = canvasInnerRef.value
+  if (!inner) return false
+  const localX = toLocalX(clientX)
+  return localX >= -60 && localX <= inner.offsetWidth + 60
 }
 
 // 拖拽被取消（Esc / 拖出窗口）时清理拖放状态，避免幽灵残留
@@ -360,9 +382,20 @@ function onNodeDrop(e, targetIdx) {
 
 function onDropToCanvas(e) {
   const src = dragSource.value
-  if (src && src.type === 'library') {
+  if (!src) return
+  if (src.type === 'library') {
     pendingFlashId.value = src.modelId
     emit('add-to-chain', src.modelId, computeInsertIndex(e.clientX))
+  } else if (src.type === 'canvas') {
+    const model = props.chain[src.idx]
+    if (!model) { dragSource.value = null; dragOverIdx.value = null; return }
+    if (isInsideChainRow(e.clientX)) {
+      // 链行内空白落点 → 按最近间隙重排
+      emit('reorder', src.idx, computeInsertIndex(e.clientX))
+    } else {
+      // 拖出画布 → 从链中移除（README 声明的行为）
+      emit('remove-from-chain', model.id)
+    }
   }
   dragSource.value = null
   dragOverIdx.value = null
@@ -395,12 +428,17 @@ function onWireDrop(e, insertIdx) {
   dragOverIdx.value = null
 }
 
+// 视口 X 坐标 → canvas-inner 局部坐标（已反算平移与缩放）
+function toLocalX(clientX) {
+  const canvasRect = canvasEl.value.getBoundingClientRect()
+  return (clientX - canvasRect.left - panX.value) / scale.value
+}
+
 // 空白处落点：按鼠标 X 坐标与各节点中点比对，换算成真实插入下标。
 // 节点之间 60px 的连线空隙对鼠标事件透明，落点会穿透到画布空白处，
 // 必须用坐标算出插到哪个间隙，而不是一律追加到链尾。
 function computeInsertIndex(clientX) {
-  const canvasRect = canvasEl.value.getBoundingClientRect()
-  const localX = (clientX - canvasRect.left - panX.value) / scale.value
+  const localX = toLocalX(clientX)
   const nodeEls = canvasInnerRef.value.querySelectorAll('.model-node')
   for (let i = 0; i < nodeEls.length; i++) {
     const el = nodeEls[i]
@@ -597,13 +635,23 @@ defineExpose({
   background: rgba(255, 255, 255, 0.75);
   color: #67c23a;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 2px;
   pointer-events: none;                 /* 不能挡住 dragover / drop 事件 */
   z-index: 5;
   box-sizing: border-box;
   box-shadow: 0 2px 10px rgba(103, 194, 58, 0.12);
   transition: transform 0.15s ease-out; /* 随鼠标在间隙之间平滑滑动 */
+}
+.drop-ghost-name {
+  font-size: 11px;
+  font-weight: 500;
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ghost-enter-active,

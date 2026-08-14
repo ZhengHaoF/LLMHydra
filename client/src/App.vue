@@ -76,6 +76,7 @@
             <NodeCanvas
               ref="canvasRef"
               :chain="currentChainModels"
+              :models="models"
               @reorder="onReorder"
               @add-to-chain="onAddToChain"
               @remove-from-chain="onRemoveFromChain"

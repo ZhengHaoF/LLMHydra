@@ -324,28 +324,6 @@ class ConfigManager {
     this._ensureConfig();
     return this._config.settings.admin_password;
   }
-
-  getConfigSanitized() {
-    this._ensureConfig();
-    const config = JSON.parse(JSON.stringify(this._config));
-    // 脱敏：隐藏上游 API Key
-    if (Array.isArray(config.models)) {
-      for (const model of config.models) {
-        if (model.endpoint && model.endpoint.api_key) {
-          const key = model.endpoint.api_key;
-          model.endpoint.api_key_masked = key.length > 8
-            ? key.slice(0, 4) + '***' + key.slice(-4)
-            : '***';
-          delete model.endpoint.api_key;
-        }
-      }
-    }
-    // 脱敏：移除 admin_password
-    if (config.settings) {
-      delete config.settings.admin_password;
-    }
-    return config;
-  }
 }
 
 module.exports = ConfigManager;

@@ -31,21 +31,29 @@ function recordStats(entry) {
 
 // ---- 工具 ----
 
-function readBody(req) {
+// 代理请求体大小上限（20MB），防止无限制读入内存
+const MAX_PROXY_BODY = 20 * 1024 * 1024;
+
+function readBody(req, maxBytes = MAX_PROXY_BODY) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', c => chunks.push(c));
+    let total = 0;
+    let overflowed = false;
+    req.on('data', (c) => {
+      if (overflowed) return;
+      total += c.length;
+      if (total > maxBytes) {
+        overflowed = true;
+        const err = new Error('request body too large');
+        err.statusCode = 413;
+        reject(err);
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });
-}
-
-function transformDeltaContent(delta) {
-  return null;
-}
-
-function transformMessageContent(message) {
-  return null;
 }
 
 // 从上游错误响应 body 中提取简短可读的错误详情（OpenAI 兼容格式 error.message），避免日志过长
@@ -80,6 +88,9 @@ function tryModel({ model, method, targetPath, baseHeaders, body, timeoutMs }) {
     delete reqHeaders.host;
     delete reqHeaders['content-length'];
     delete reqHeaders['accept-encoding'];
+    // 上游有自己的 api_key 才设置 Authorization；
+    // 否则删除客户端带来的授权头，避免把代理密钥转发给上游
+    delete reqHeaders.authorization;
     reqHeaders['content-length'] = Buffer.byteLength(body);
     if (apiKey) {
       reqHeaders['authorization'] = `Bearer ${apiKey}`;
@@ -169,9 +180,15 @@ function createProxyMiddleware(configManager, circuitBreaker) {
     try {
       rawBody = await readBody(req);
     } catch (err) {
+      const status = err.statusCode || 500;
       log(`[ERROR] 读取请求体失败: ${err.message}`);
-      res.writeHead(500);
-      return res.end('Failed to read request body');
+      res.writeHead(status);
+      res.end(status === 413 ? 'Request body too large (max 20MB)' : 'Failed to read request body');
+      if (status === 413) {
+        // 等 413 响应真正发出后再断开连接，中止客户端继续上传剩余 body
+        res.on('finish', () => req.destroy());
+      }
+      return;
     }
 
     // 提取 group id（model 字段）
@@ -370,10 +387,19 @@ function relayUpstream(upstreamRes, clientRes, isStream) {
       const rh = { ...upstreamRes.headers };
       delete rh['transfer-encoding'];
       clientRes.writeHead(upstreamRes.statusCode, rh);
+      // 客户端断开时中止上游请求，避免泄漏连接
+      const onClientClose = () => {
+        if (!upstreamRes.destroyed) upstreamRes.destroy();
+      };
+      clientRes.on('close', onClientClose);
       upstreamRes.pipe(clientRes);
-      upstreamRes.on('end', () => resolve({ usage: null }));
+      upstreamRes.on('end', () => {
+        clientRes.removeListener('close', onClientClose);
+        resolve({ usage: null });
+      });
       upstreamRes.on('error', () => {
         if (!clientRes.writableEnded) clientRes.end();
+        clientRes.removeListener('close', onClientClose);
         resolve({ usage: null, error: true });
       });
     });
@@ -384,6 +410,12 @@ function handleSSE(upstreamRes, clientRes) {
   return new Promise((resolve) => {
     let buffer = '';
     let lastUsage = null;
+
+    // 客户端断开时中止上游请求，避免长流泄漏连接
+    const onClientClose = () => {
+      if (!upstreamRes.destroyed) upstreamRes.destroy();
+    };
+    clientRes.on('close', onClientClose);
 
     upstreamRes.on('data', (chunk) => {
       buffer += chunk.toString();
@@ -397,17 +429,11 @@ function handleSSE(upstreamRes, clientRes) {
             const data = JSON.parse(line.slice(6));
             if (data.usage) lastUsage = data.usage;
             if (data.choices && Array.isArray(data.choices)) {
-              for (const choice of data.choices) {
-                if (choice.delta) {
-                  const r = transformDeltaContent(choice.delta);
-                  if (r) choice.delta = r.delta;
-                }
-              }
               output = 'data: ' + JSON.stringify(data);
             }
           } catch (e) { /* pass through */ }
         }
-        clientRes.write(output + '\n');
+        try { clientRes.write(output + '\n'); } catch (_) { /* 客户端可能已断开 */ }
       }
     });
 
@@ -418,14 +444,6 @@ function handleSSE(upstreamRes, clientRes) {
           try {
             const data = JSON.parse(line.slice(6));
             if (data.usage) lastUsage = data.usage;
-            if (data.choices && Array.isArray(data.choices)) {
-              for (const choice of data.choices) {
-                if (choice.delta) {
-                  const r = transformDeltaContent(choice.delta);
-                  if (r) choice.delta = r.delta;
-                }
-              }
-            }
             clientRes.write('data: ' + JSON.stringify(data) + '\n');
           } catch (e) { clientRes.write(line + '\n'); }
         } else if (line) {
@@ -433,11 +451,13 @@ function handleSSE(upstreamRes, clientRes) {
         }
       }
       clientRes.end();
+      clientRes.removeListener('close', onClientClose);
       resolve({ usage: lastUsage });
     });
 
     upstreamRes.on('error', () => {
       if (!clientRes.writableEnded) clientRes.end();
+      clientRes.removeListener('close', onClientClose);
       resolve({ usage: lastUsage, error: true });
     });
   });
@@ -454,12 +474,6 @@ function handleNonStreaming(upstreamRes, clientRes, statusCode) {
         const data = JSON.parse(body);
         if (data.usage) usage = data.usage;
         if (data.choices && Array.isArray(data.choices)) {
-          for (const choice of data.choices) {
-            if (choice.message) {
-              const r = transformMessageContent(choice.message);
-              if (r) choice.message = r.message;
-            }
-          }
           responseBody = JSON.stringify(data);
         }
       } catch (e) { /* not JSON */ }
@@ -825,15 +839,37 @@ function createApp(configManager) {
   app.use('/api', api);
 
   // ========== 代理中间件（仅 OpenAI 兼容路径） ==========
-  const proxyPaths = ['/v1/chat/completions', '/chat/completions', '/v1/embeddings', '/embeddings', '/v1/models', '/models'];
+  const proxyPaths = ['/v1/chat/completions', '/chat/completions', '/v1/embeddings', '/embeddings', '/v1/models', '/models', '/v1/responses', '/responses', '/v1/completions', '/completions'];
+
+  // GET /v1/models — 返回配置组 ID 列表（OpenAI 兼容格式），供 AI 工具探测可用模型
+  function handleModelsList(req, res) {
+    const settings = configManager.getSettings();
+    const auth = req.headers['authorization'] || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    if (!token || token !== settings.proxy_key) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Invalid proxy key' }));
+    }
+    const groups = configManager.getConfig().groups;
+    res.json({
+      object: 'list',
+      data: groups.map((g) => ({ id: g.id, object: 'model', created: 0, owned_by: 'llm-hydra' }))
+    });
+  }
   const proxyMiddleware = createProxyMiddleware(configManager, circuitBreaker);
 
   app.use((req, res, next) => {
     const path = req.path.toLowerCase();
     // 检查是否是代理路径
     const isProxyPath = proxyPaths.some(p => path === p || path.startsWith(p + '/'));
-    if (isProxyPath && req.method === 'POST') {
-      return proxyMiddleware(req, res, next);
+    if (isProxyPath) {
+      if (req.method === 'POST') {
+        return proxyMiddleware(req, res, next);
+      }
+      // GET 模型列表：返回配置组 ID 列表（OpenAI 兼容），供工具探测可用模型
+      if (req.method === 'GET' && (path === '/v1/models' || path === '/models')) {
+        return handleModelsList(req, res);
+      }
     }
     next();
   });

@@ -6,6 +6,7 @@ proxy_config.json
 stats.db
 stats.db-shm
 stats.db-wal
+package-lock.json
 *.log
 .DS_Store
 Thumbs.db
