@@ -401,7 +401,8 @@ async function onReorder(fromIdx, toIdx) {
   if (!g) return
   const newChain = [...g.chain]
   const [moved] = newChain.splice(fromIdx, 1)
-  newChain.splice(toIdx, 0, moved)
+  // toIdx 是"移除前"链中的目标位置：向前移动时，移除元素后目标下标要 -1
+  newChain.splice(toIdx > fromIdx ? toIdx - 1 : toIdx, 0, moved)
   try {
     await api.updateGroup(g.id, { chain: newChain })
     await loadData()
