@@ -2,6 +2,7 @@ node_modules/
 client/dist/
 .idea/
 .workbuddy/
+.pnpm-store/
 proxy_config.json
 stats.db
 stats.db-shm

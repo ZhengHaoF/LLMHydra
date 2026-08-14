@@ -74,6 +74,14 @@ pnpm build        # 仅构建前端到 client/dist
 pnpm --filter llm-hydra-server start   # 生产模式启动服务端
 ```
 
+### 打包分发
+
+```bash
+pnpm run pack:zip   # 打包为 llm-hydra-v<版本>-<时间戳>.zip（输出到项目根目录）
+```
+
+打包自动排除：`node_modules`、`stats.db` 及 WAL 文件、`proxy_config.json`（含密钥）、`.git` / `.idea` / `.workbuddy` / `.pnpm-store`、日志与历史 zip。收到压缩包后执行 `pnpm install && pnpm start` 即可运行（已含 `client/dist` 构建产物）。
+
 ## 🎮 使用方式
 
 ### 1. 添加模型
