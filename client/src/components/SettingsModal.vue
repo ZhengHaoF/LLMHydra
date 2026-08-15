@@ -42,9 +42,33 @@
               </div>
             </div>
           </div>
+
+          <div class="section">
+            <h3>OpenRouter 模型库</h3>
+            <p class="section-desc">
+              拉取 OpenRouter 公开的模型列表，编辑模型时可根据 model_id 自动匹配上下文窗口和最大输入/输出 token（参考值，可手动修改）。
+            </p>
+
+            <div class="or-status">
+              <span v-if="orCached.count > 0">
+                已缓存 <strong>{{ orCached.count }}</strong> 个模型
+                <span class="or-time">· 上次更新: {{ formatTime(orCached.fetched_at) }}</span>
+              </span>
+              <span v-else class="or-empty">尚未拉取</span>
+            </div>
+
+            <div class="or-actions">
+              <button class="btn-primary" @click="refreshOpenRouter" :disabled="refreshing">
+                {{ refreshing ? '拉取中...' : '拉取模型列表' }}
+              </button>
+              <span v-if="orError" class="or-error">{{ orError }}</span>
+              <span v-else-if="orSuccess" class="or-success">{{ orSuccess }}</span>
+            </div>
+          </div>
         </div>
 
         <div class="modal-footer">
+          <button class="btn-danger" @click="confirmLogout">退出登录</button>
           <button class="btn-cancel" @click="resetDefaults">恢复默认</button>
           <div class="spacer"></div>
           <button class="btn-cancel" @click="close">取消</button>
@@ -68,10 +92,16 @@ const props = defineProps({
   visible: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['close', 'saved'])
+const emit = defineEmits(['close', 'saved', 'logout'])
 
 const form = ref({ ...DEFAULTS })
 const saving = ref(false)
+
+// OpenRouter 模型库状态
+const orCached = ref({ fetched_at: null, count: 0, models: [] })
+const refreshing = ref(false)
+const orError = ref('')
+const orSuccess = ref('')
 
 async function loadSettings() {
   try {
@@ -85,12 +115,60 @@ async function loadSettings() {
   }
 }
 
+async function loadOpenRouterStatus() {
+  try {
+    const data = await api.getOpenRouterModels()
+    orCached.value = {
+      fetched_at: data?.fetched_at || null,
+      count: data?.count || 0,
+      models: data?.models || []
+    }
+  } catch (e) {
+    console.error('加载 OpenRouter 模型库状态失败:', e)
+  }
+}
+
+function formatTime(iso) {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  } catch {
+    return iso
+  }
+}
+
+async function refreshOpenRouter() {
+  refreshing.value = true
+  orError.value = ''
+  orSuccess.value = ''
+  try {
+    const data = await api.refreshOpenRouterModels()
+    orSuccess.value = `成功拉取 ${data.count} 个模型`
+    await loadOpenRouterStatus()
+  } catch (e) {
+    orError.value = e.message || '拉取失败'
+  } finally {
+    refreshing.value = false
+  }
+}
+
 watch(() => props.visible, (val) => {
-  if (val) loadSettings()
+  if (val) {
+    loadSettings()
+    loadOpenRouterStatus()
+  }
 })
 
 function close() {
   emit('close')
+}
+
+function confirmLogout() {
+  if (window.confirm('确定要退出登录吗？')) {
+    emit('logout')
+  }
 }
 
 function resetDefaults() {
@@ -243,13 +321,23 @@ async function save() {
 }
 
 .btn-primary,
-.btn-cancel {
+.btn-cancel,
+.btn-danger {
   padding: 8px 20px;
   border-radius: 6px;
   border: none;
   font-size: 14px;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.btn-danger {
+  background: #f56c6c;
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #f78989;
 }
 
 .btn-primary {
@@ -275,5 +363,37 @@ async function save() {
 .btn-cancel:hover {
   color: #409eff;
   border-color: #c6e2ff;
+}
+
+.or-status {
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 12px;
+}
+.or-status strong {
+  color: #303133;
+  font-weight: 600;
+}
+.or-time {
+  color: #909399;
+  margin-left: 4px;
+}
+.or-empty {
+  color: #909399;
+  font-style: italic;
+}
+.or-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.or-error {
+  font-size: 12px;
+  color: #f56c6c;
+}
+.or-success {
+  font-size: 12px;
+  color: #67c23a;
 }
 </style>

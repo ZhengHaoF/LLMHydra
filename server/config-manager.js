@@ -83,6 +83,25 @@ function normalizeModel(m) {
   if (!out.effort) out.effort = 'medium';
   if (out.ssl_verify === undefined) out.ssl_verify = true;
   if (out.endpoint_timeout === undefined) out.endpoint_timeout = 30;
+  // OpenRouter 参考值（展示用，可空）
+  if (out.context_length !== undefined && out.context_length !== null) {
+    const v = parseInt(out.context_length);
+    out.context_length = Number.isFinite(v) && v >= 0 ? v : null;
+  } else {
+    out.context_length = null;
+  }
+  if (out.max_input_tokens !== undefined && out.max_input_tokens !== null) {
+    const v = parseInt(out.max_input_tokens);
+    out.max_input_tokens = Number.isFinite(v) && v >= 0 ? v : null;
+  } else {
+    out.max_input_tokens = null;
+  }
+  if (out.max_output_tokens !== undefined && out.max_output_tokens !== null) {
+    const v = parseInt(out.max_output_tokens);
+    out.max_output_tokens = Number.isFinite(v) && v >= 0 ? v : null;
+  } else {
+    out.max_output_tokens = null;
+  }
   return out;
 }
 
@@ -102,7 +121,11 @@ function normalizeSettings(s) {
     circuit_breaker_duration_min: (s && typeof s.circuit_breaker_duration_min === 'number' && s.circuit_breaker_duration_min >= 1)
       ? s.circuit_breaker_duration_min : DEFAULT_SETTINGS.circuit_breaker_duration_min,
     proxy_key: (s && typeof s.proxy_key === 'string') ? s.proxy_key : '',
-    admin_password: (s && typeof s.admin_password === 'string' && s.admin_password.length > 0) ? s.admin_password : ''
+    admin_password: (s && typeof s.admin_password === 'string' && s.admin_password.length > 0) ? s.admin_password : '',
+    // OpenRouter 模型库缓存（首次启动为 null，刷新后填充）
+    openrouter_models: (s && typeof s.openrouter_models === 'object' && s.openrouter_models !== null)
+      ? s.openrouter_models
+      : null
   };
 }
 
@@ -237,7 +260,10 @@ class ConfigManager {
       thinking_enabled: model.thinking_enabled,
       effort: model.effort,
       ssl_verify: model.ssl_verify,
-      endpoint_timeout: model.endpoint_timeout
+      endpoint_timeout: model.endpoint_timeout,
+      context_length: model.context_length,
+      max_input_tokens: model.max_input_tokens,
+      max_output_tokens: model.max_output_tokens
     });
     this._config.models.push(m);
     this.save();
@@ -255,6 +281,31 @@ class ConfigManager {
     if (model.effort !== undefined) existing.effort = model.effort;
     if (model.ssl_verify !== undefined) existing.ssl_verify = model.ssl_verify;
     if (model.endpoint_timeout !== undefined) existing.endpoint_timeout = model.endpoint_timeout;
+    // OpenRouter 参考值：null 表示清空，undefined 表示不动
+    if (model.context_length !== undefined) {
+      if (model.context_length === null) {
+        existing.context_length = null;
+      } else {
+        const v = parseInt(model.context_length);
+        existing.context_length = Number.isFinite(v) && v >= 0 ? v : null;
+      }
+    }
+    if (model.max_input_tokens !== undefined) {
+      if (model.max_input_tokens === null) {
+        existing.max_input_tokens = null;
+      } else {
+        const v = parseInt(model.max_input_tokens);
+        existing.max_input_tokens = Number.isFinite(v) && v >= 0 ? v : null;
+      }
+    }
+    if (model.max_output_tokens !== undefined) {
+      if (model.max_output_tokens === null) {
+        existing.max_output_tokens = null;
+      } else {
+        const v = parseInt(model.max_output_tokens);
+        existing.max_output_tokens = Number.isFinite(v) && v >= 0 ? v : null;
+      }
+    }
     if (model.endpoint !== undefined && model.endpoint) {
       existing.endpoint = {
         url: model.endpoint.url || '',
@@ -304,8 +355,22 @@ class ConfigManager {
       const v = parseInt(patch.circuit_breaker_duration_min);
       if (v >= 1 && v <= 1440) s.circuit_breaker_duration_min = v;
     }
+    // 注意：openrouter_models 不通过 updateSettings 修改，避免被 PUT /api/settings 清空
     this.save();
     return s;
+  }
+
+  // ---- OpenRouter 模型库 ----
+
+  getOpenRouterModels() {
+    this._ensureConfig();
+    return this._config.settings.openrouter_models || null;
+  }
+
+  setOpenRouterModels(payload) {
+    this._ensureConfig();
+    this._config.settings.openrouter_models = payload;
+    this.save();
   }
 
   getProxyKey() {

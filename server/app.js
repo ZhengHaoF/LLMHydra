@@ -12,14 +12,24 @@ const { isValidGroupId } = require('./config-manager');
 const CircuitBreaker = require('./circuit-breaker');
 const statsManager = require('./stats-manager');
 const logManager = require('./log-manager');
+const openrouter = require('./openrouter');
 
 // SSE 连接数限制
 const MAX_SSE_CONNECTIONS = 10;
 let currentSSEConnections = 0;
 
+function formatLogTime(date = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    hourCycle: 'h23',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).format(date);
+}
+
 function log(msg) {
-  const ts = new Date().toISOString().slice(11, 19);
-  console.log(`[${ts}] ${msg}`);
+  console.log(`[${formatLogTime()}] ${msg}`);
   logManager.append(msg);
 }
 
@@ -695,6 +705,49 @@ function createApp(configManager) {
   api.delete('/logs', (req, res) => {
     logManager.clear();
     res.json({ success: true });
+  });
+
+  // ---- OpenRouter 模型库 ----
+
+  // 简单限流：1 分钟内最多刷新一次，避免前端手抖反复点
+  let lastRefreshAt = 0;
+  const REFRESH_COOLDOWN_MS = 60 * 1000;
+
+  api.get('/openrouter/models', (req, res) => {
+    const cached = openrouter.getCached(configManager);
+    res.json(cached || { fetched_at: null, count: 0, models: [] });
+  });
+
+  api.post('/openrouter/refresh', async (req, res) => {
+    const now = Date.now();
+    if (now - lastRefreshAt < REFRESH_COOLDOWN_MS) {
+      const waitSec = Math.ceil((REFRESH_COOLDOWN_MS - (now - lastRefreshAt)) / 1000);
+      return res.status(429).json({ error: `操作过于频繁，请 ${waitSec} 秒后再试` });
+    }
+    lastRefreshAt = now;
+    try {
+      log('[OpenRouter] 开始拉取模型列表…');
+      const payload = await openrouter.fetchAndCache(configManager);
+      log(`[OpenRouter] 拉取完成，共 ${payload.count} 个模型`);
+      res.json({ success: true, count: payload.count, fetched_at: payload.fetched_at });
+    } catch (err) {
+      log(`[OpenRouter] 拉取失败: ${err.message}`);
+      // 失败回滚 lastRefreshAt，允许立即重试
+      lastRefreshAt = 0;
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  api.get('/openrouter/match', (req, res) => {
+    const modelId = (req.query.model_id || '').trim();
+    if (!modelId) {
+      return res.status(400).json({ error: 'model_id 不能为空' });
+    }
+    const match = openrouter.matchById(configManager, modelId);
+    if (!match) {
+      return res.json({ matched: false });
+    }
+    res.json({ matched: true, model: match });
   });
 
   // ---- 设置 ----

@@ -21,10 +21,17 @@ class LogManager {
 
   // 追加一条日志并广播给所有订阅者
   append(message) {
+    const time = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Shanghai',
+      hourCycle: 'h23',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    }).format(new Date());
     const entry = {
       type: 'log',
       ts: Date.now(),
-      time: new Date().toISOString().slice(11, 19),
+      time,
       level: this.parseLevel(message),
       message
     };

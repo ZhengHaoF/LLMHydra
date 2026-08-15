@@ -7,8 +7,65 @@
 
     <div class="form-group">
       <label>模型 ID <span class="required">*</span></label>
-      <input v-model="form.model_id" placeholder="例如: deepseek-chat / deepseek-v3" />
-      <div class="field-hint">转发给上游 API 的实际模型名称</div>
+      <div class="model-id-row">
+        <input
+          v-model="form.model_id"
+          placeholder="例如: deepseek-chat / openai/gpt-4o"
+          class="model-id-input"
+        />
+        <button
+          type="button"
+          class="btn-match"
+          @click="handleMatch(true)"
+          :disabled="matching"
+          :title="orLoaded ? '根据本地 OpenRouter 模型库匹配' : '本地未缓存，请先在设置中拉取模型列表'"
+        >
+          {{ matching ? '匹配中...' : '尝试匹配' }}
+        </button>
+      </div>
+      <div class="field-hint">
+        转发给上游 API 的实际模型名称。输入后会自动尝试从本地 OpenRouter 模型库匹配（仅在字段为空时填入）。
+        <span v-if="matchHint" class="match-hint" :class="matchHintType">{{ matchHint }}</span>
+      </div>
+    </div>
+
+    <div class="form-group or-ref-group">
+      <label class="or-ref-label">
+        OpenRouter 参考值
+        <span class="or-ref-tip">（仅展示参考，可手动修改）</span>
+      </label>
+      <div class="or-ref-row">
+        <label class="or-ref-field">
+          <span class="or-ref-name">上下文窗口总长</span>
+          <input
+            v-model.number="form.context_length"
+            type="number"
+            min="0"
+            class="or-ref-input"
+            placeholder="如 128000"
+          />
+        </label>
+        <label class="or-ref-field">
+          <span class="or-ref-name">最大输入（参考）</span>
+          <input
+            v-model.number="form.max_input_tokens"
+            type="number"
+            min="0"
+            class="or-ref-input"
+            placeholder="context - max_output"
+          />
+        </label>
+        <label class="or-ref-field">
+          <span class="or-ref-name">最大输出（参考）</span>
+          <input
+            v-model.number="form.max_output_tokens"
+            type="number"
+            min="0"
+            class="or-ref-input"
+            placeholder="如 4096"
+          />
+        </label>
+      </div>
     </div>
 
     <div class="form-group">
@@ -86,9 +143,32 @@
 </template>
 
 <script setup>
-import { reactive, watch, ref } from 'vue'
+import { reactive, watch, ref, onMounted } from 'vue'
 import { IconX } from '@tabler/icons-vue'
 import api from '../api.js'
+
+// 简单模块级缓存：避免每次打开编辑弹窗都拉一次
+// 注意：请求失败时不要写 _orCache，让下次 handleMatch 重新尝试，
+//       并把真实错误暴露到 console，方便排查
+let _orCache = null
+let _orCachePromise = null
+async function getOrCache() {
+  if (_orCache) return _orCache
+  if (_orCachePromise) return _orCachePromise
+  _orCachePromise = api.getOpenRouterModels()
+    .then((data) => {
+      _orCache = data || { fetched_at: null, count: 0, models: [] }
+      return _orCache
+    })
+    .catch((e) => {
+      console.error('[ModelEditor] 加载 OpenRouter 模型库失败:', e?.message || e)
+      // 不写 _orCache：保持 null，下次 handleMatch 会重新请求
+      // 给本次调用返回一个空对象，让外层判断逻辑走「请先在设置中拉取」分支
+      return { fetched_at: null, count: 0, models: [] }
+    })
+    .finally(() => { _orCachePromise = null })
+  return _orCachePromise
+}
 
 const props = defineProps({
   model: { type: Object, default: () => ({}) },
@@ -101,6 +181,13 @@ const testing = ref(false)
 const showTestResult = ref(false)
 const testResult = ref({ success: false, status: 0, response: null, error: '' })
 
+// 匹配相关
+const orLoaded = ref(false)         // 本地是否已缓存模型库
+const matching = ref(false)
+const matchHint = ref('')
+const matchHintType = ref('info')   // info | success | warn
+let matchDebounceTimer = null
+
 const form = reactive({
   display_name: '',
   model_id: '',
@@ -108,7 +195,16 @@ const form = reactive({
   thinking_enabled: true,
   effort: 'medium',
   ssl_verify: true,
-  endpoint_timeout: 30
+  endpoint_timeout: 30,
+  // OpenRouter 参考值
+  context_length: null,
+  max_input_tokens: null,
+  max_output_tokens: null
+})
+
+onMounted(async () => {
+  const cached = await getOrCache()
+  orLoaded.value = (cached && cached.count > 0)
 })
 
 watch(() => props.model, (val) => {
@@ -134,9 +230,118 @@ watch(() => props.model, (val) => {
     thinking_enabled: val.thinking_enabled !== false,
     effort: val.effort || 'medium',
     ssl_verify: val.ssl_verify !== false,
-    endpoint_timeout: val.endpoint_timeout !== undefined ? val.endpoint_timeout : 30
+    endpoint_timeout: val.endpoint_timeout !== undefined ? val.endpoint_timeout : 30,
+    context_length: val.context_length ?? null,
+    max_input_tokens: val.max_input_tokens ?? null,
+    max_output_tokens: val.max_output_tokens ?? null
   });
 }, { immediate: true })
+
+// model_id 变化时防抖自动匹配
+watch(() => form.model_id, (val) => {
+  if (matchDebounceTimer) clearTimeout(matchDebounceTimer)
+  if (!val || !val.trim()) {
+    matchHint.value = ''
+    return
+  }
+  matchDebounceTimer = setTimeout(() => {
+    handleMatch(false)
+  }, 500)
+})
+
+// 本地缓存匹配（不需要走服务端）
+function localMatch(modelId) {
+  if (!_orCache || !Array.isArray(_orCache.models) || _orCache.models.length === 0) return null
+  const target = modelId.trim().toLowerCase()
+  const list = _orCache.models
+  // 精确
+  let hit = list.find((m) => m.id.toLowerCase() === target)
+  if (hit) return toMatchResult(hit)
+  // 模糊：忽略厂商前缀
+  const suffixes = list
+    .map((m) => ({ m, idLower: m.id.toLowerCase() }))
+    .filter((x) => x.idLower.endsWith('/' + target) || x.idLower === target)
+  if (suffixes.length > 0) {
+    suffixes.sort((a, b) => a.m.id.length - b.m.id.length)
+    return toMatchResult(suffixes[0].m)
+  }
+  return null
+}
+
+function toMatchResult(m) {
+  const context = m.context_length
+  const output = m.max_output_tokens
+  let input = null
+  if (typeof context === 'number' && typeof output === 'number') {
+    const v = context - output
+    input = v > 0 ? v : null
+  }
+  return {
+    id: m.id,
+    name: m.name,
+    context_length: context,
+    max_output_tokens: output,
+    max_input_tokens: input
+  }
+}
+
+function showMatchHint(text, type = 'info') {
+  matchHint.value = text
+  matchHintType.value = type
+}
+
+// manual=true：立即触发（按钮点击）
+// manual=false：自动触发（防抖后的），不显示 "未匹配" 提示避免打扰
+async function handleMatch(manual) {
+  const modelId = (form.model_id || '').trim()
+  if (!modelId) {
+    if (manual) showMatchHint('请先输入模型 ID', 'warn')
+    return
+  }
+  if (!_orCache || !_orCache.count) {
+    // 懒加载一次
+    await getOrCache()
+    orLoaded.value = (_orCache && _orCache.count > 0)
+  }
+  if (!_orCache || !_orCache.count) {
+    if (manual) showMatchHint('本地模型库为空，请先在设置中拉取', 'warn')
+    return
+  }
+  matching.value = true
+  try {
+    const hit = localMatch(modelId)
+    if (!hit) {
+      if (manual) showMatchHint(`本地未匹配到「${modelId}」`, 'warn')
+      else showMatchHint('', 'info')
+      return
+    }
+    // 匹配成功：仅在字段为空时填入，避免覆盖用户已填值
+    const filled = []
+    const skipped = []
+    if (form.context_length === null || form.context_length === undefined || form.context_length === '') {
+      if (hit.context_length !== null) { form.context_length = hit.context_length; filled.push('上下文窗口') }
+    } else if (hit.context_length !== null) {
+      skipped.push('上下文窗口')
+    }
+    if (form.max_input_tokens === null || form.max_input_tokens === undefined || form.max_input_tokens === '') {
+      if (hit.max_input_tokens !== null) { form.max_input_tokens = hit.max_input_tokens; filled.push('最大输入') }
+    } else if (hit.max_input_tokens !== null) {
+      skipped.push('最大输入')
+    }
+    if (form.max_output_tokens === null || form.max_output_tokens === undefined || form.max_output_tokens === '') {
+      if (hit.max_output_tokens !== null) { form.max_output_tokens = hit.max_output_tokens; filled.push('最大输出') }
+    } else if (hit.max_output_tokens !== null) {
+      skipped.push('最大输出')
+    }
+    let hint = `已匹配到 ${hit.id}`
+    if (filled.length) hint += `，填入：${filled.join('、')}`
+    if (skipped.length) hint += `（已填值未覆盖：${skipped.join('、')}）`
+    if (!filled.length && skipped.length) hint = `已匹配到 ${hit.id}，但所有字段已有值，未覆盖`
+    showMatchHint(hint, 'success')
+  } finally {
+    matching.value = false
+  }
+}
 
 function handleSave() {
   if (!form.display_name.trim()) return alert('请输入显示名称');
@@ -153,7 +358,10 @@ function handleSave() {
     thinking_enabled: form.thinking_enabled,
     effort: form.effort,
     ssl_verify: form.ssl_verify,
-    endpoint_timeout: form.endpoint_timeout
+    endpoint_timeout: form.endpoint_timeout,
+    context_length: form.context_length,
+    max_input_tokens: form.max_input_tokens,
+    max_output_tokens: form.max_output_tokens
   });
 }
 
@@ -227,6 +435,115 @@ function formatResponse(val) {
   font-size: 11px;
   color: #909399;
   margin-top: 4px;
+}
+.match-hint {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.match-hint.success { color: #67c23a; background: #f0f9eb; }
+.match-hint.warn    { color: #e6a23c; background: #fdf6ec; }
+.match-hint.info    { color: #909399; }
+
+/* 模型 ID 行：输入框 + 尝试匹配按钮 */
+.model-id-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.model-id-row .model-id-input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+  background: #fff;
+  box-sizing: border-box;
+}
+.model-id-row .model-id-input:focus {
+  border-color: #409eff;
+}
+.btn-match {
+  flex-shrink: 0;
+  padding: 0 14px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #f5f7fa;
+  color: #606266;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.btn-match:hover:not(:disabled) {
+  color: #409eff;
+  border-color: #c6e2ff;
+  background: #ecf5ff;
+}
+.btn-match:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* OpenRouter 参考值分组 */
+.or-ref-group {
+  background: #fafbfc;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.or-ref-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 10px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  color: #303133 !important;
+}
+.or-ref-tip {
+  font-size: 11px;
+  color: #909399;
+  font-weight: 400;
+}
+.or-ref-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.or-ref-field {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 0 !important;
+}
+.or-ref-name {
+  font-size: 11px;
+  color: #909399;
+}
+.or-ref-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  font-size: 12px;
+  outline: none;
+  background: #fff;
+  box-sizing: border-box;
+  color: #606266;
+}
+.or-ref-input:focus {
+  border-color: #409eff;
+}
+.or-ref-input::placeholder {
+  color: #c0c4cc;
 }
 .form-row-inline {
   display: flex;

@@ -68,6 +68,27 @@
             <span class="canvas-group-id">{{ activeGroup.id }}</span>
             <span class="canvas-group-name">{{ activeGroup.name }}</span>
             <span class="canvas-hint">· {{ activeGroup.chain.length }} 个节点 · 按顺序重试 · 调用名 "<code>{{ activeGroup.id }}</code>"</span>
+            <template v-if="tokenSuggestion && tokenSuggestion.anyFilled">
+              <span class="canvas-hint">· 链内建议（最小值）</span>
+              <span class="canvas-tokens">
+                <span
+                  v-if="tokenSuggestion.context_length !== null"
+                  class="canvas-token-item"
+                  :title="tokenTooltip.context_length"
+                >上下文 {{ tokenSuggestion.context_length }}</span>
+                <span
+                  v-if="tokenSuggestion.max_input_tokens !== null"
+                  class="canvas-token-item"
+                  :title="tokenTooltip.max_input_tokens"
+                >最大输入 {{ tokenSuggestion.max_input_tokens }}</span>
+                <span
+                  v-if="tokenSuggestion.max_output_tokens !== null"
+                  class="canvas-token-item"
+                  :title="tokenTooltip.max_output_tokens"
+                >最大输出 {{ tokenSuggestion.max_output_tokens }}</span>
+              </span>
+            </template>
+            <span v-else-if="activeGroup.chain.length > 0" class="canvas-hint canvas-hint-warn">· 未配置 token 参考值，可在模型编辑中拉取 OpenRouter 或手动填写</span>
           </div>
           <div class="canvas-title canvas-title-empty" v-else>
             <span class="canvas-hint">请在左侧选择或新建一个配置组</span>
@@ -118,7 +139,7 @@
     <StatsModal :visible="showStats" @close="showStats = false" />
 
     <!-- 设置弹窗 -->
-    <SettingsModal :visible="showSettings" @close="showSettings = false" @saved="onSettingsSaved" />
+    <SettingsModal :visible="showSettings" @close="showSettings = false" @saved="onSettingsSaved" @logout="onSettingsLogout" />
     </template>
   </div>
 </template>
@@ -171,6 +192,45 @@ const currentChainModels = computed(() => {
   if (!g) return []
   const map = new Map(models.value.map((m) => [m.id, m]))
   return g.chain.map((id) => map.get(id)).filter((m) => m)
+})
+
+// 链内 token 建议：取所有模型（排除空值/0）后的最小值
+const tokenSuggestion = computed(() => {
+  const list = currentChainModels.value
+  if (list.length === 0) return null
+  const pick = (key) => {
+    const vals = list
+      .map((m) => m?.[key])
+      .filter((v) => Number.isFinite(v) && v > 0)
+    return vals.length ? Math.min(...vals) : null
+  }
+  const ctx = pick('context_length')
+  const mi = pick('max_input_tokens')
+  const mo = pick('max_output_tokens')
+  return {
+    context_length: ctx,
+    max_input_tokens: mi,
+    max_output_tokens: mo,
+    anyFilled: ctx !== null || mi !== null || mo !== null
+  }
+})
+
+// 给每个 token 字段生成 tooltip：列出所有有效模型的值
+const tokenTooltip = computed(() => {
+  const list = currentChainModels.value
+  const build = (key) => {
+    const rows = list
+      .map((m) => ({ name: m.name || m.id, val: m?.[key] }))
+      .filter((r) => Number.isFinite(r.val) && r.val > 0)
+    if (rows.length === 0) return ''
+    rows.sort((a, b) => a.val - b.val)
+    return rows.map((r) => `${r.name}: ${r.val}`).join('\n') + '\n（取最小值作为链内建议）'
+  }
+  return {
+    context_length: build('context_length'),
+    max_input_tokens: build('max_input_tokens'),
+    max_output_tokens: build('max_output_tokens')
+  }
 })
 
 const currentChainIds = computed(() => activeGroup.value ? activeGroup.value.chain : [])
@@ -455,6 +515,11 @@ function onSettingsSaved() {
   // 设置保存成功，不需要额外操作
   console.log('设置已保存')
 }
+
+function onSettingsLogout() {
+  showSettings.value = false
+  doLogout()
+}
 </script>
 
 <style>
@@ -677,6 +742,28 @@ function onSettingsSaved() {
   border-radius: 3px;
   color: #409eff;
   font-family: 'Consolas', 'Monaco', monospace;
+}
+.canvas-hint-warn {
+  color: #e6a23c;
+}
+.canvas-tokens {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.canvas-token-item {
+  font-size: 12px;
+  color: #303133;
+  background: #f0f9eb;
+  border: 1px solid #e1f3d8;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  cursor: help;
+}
+.canvas-token-item:hover {
+  background: #e1f3d8;
 }
 .canvas-title-empty {
   color: #909399;

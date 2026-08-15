@@ -17,6 +17,7 @@ LLMHydra 是一个轻量级 OpenAI 兼容的 LLM 代理服务，以**节点画�
 - **使用统计**：SQLite 持久化请求明细，按总览/模型/配置组/最近/日维度聚合展示
 - **端点连通性测试**：编辑模型时直接发起探测请求并展示完整响应
 - **设置面板**：运行时调整熔断器参数，无需重启立即生效
+- **OpenRouter 模型库**：内置一键拉取 OpenRouter `/api/v1/models` 公开模型列表，编辑模型时根据 `model_id` 自动匹配上下文窗口 / 最大输入 / 最大输出 token（参考值，可手动修改）
 - **热重启**：UI 一键重启服务端进程（脱离当前进程 + 子进程拉起）
 - **兼容旧配置**：自动迁移旧的 `upstream` / `endpoints` 字段为 `endpoint` 单端点结构
 - **JSON 实时存储**：配置修改立即落盘至 `proxy_config.json`，无需数据库
@@ -98,6 +99,11 @@ pnpm run pack:zip   # 打包为 llm-hydra-v<版本>-<时间戳>.zip（输出到�
 | SSL 验证 | 是否校验上游 HTTPS 证书（默认开启） |
 | 强制 Thinking | 注入 `{thinking:{type:"enabled"}, reasoning_effort:"..."}` 参数 |
 | 推理强度 | `low` / `medium` / `high` / `max`，仅在开启 Thinking 时生效 |
+| 上下文窗口总长 | OpenRouter 参考值，可手动修改；自动匹配命中时填入 |
+| 最大输入（参考） | OpenRouter 参考值，`context_length - max_output_tokens` |
+| 最大输出（参考） | OpenRouter 参考值，对应 `top_provider.max_completion_tokens` |
+
+「模型 ID」输入框右侧的「尝试匹配」按钮可在未输入完成时主动触发匹配；正常输入会在停手 500ms 后自动尝试匹配（仅在参考值字段为空时填入，不会覆盖用户已填的值）。
 
 保存前可点击「测试」对该端点发起探测调用，立即查看 HTTP 状态与响应内容。
 
@@ -164,6 +170,19 @@ curl http://localhost:8093/v1/chat/completions \
 - 试探成功 → 重置失败计数；试探失败 → 重新进入熔断
 - 阈值（1~100）和熔断时长（1~1440 分钟）可在「设置」弹窗在线调整，立即生效
 
+## 🌐 OpenRouter 模型库
+
+聚合同一配置组的多个上游时，每个模型的 `max_tokens` 容量不一致，靠用户在客户端凭感觉填值很容易导致小模型被大值击穿、触发不必要的熔断。为解决这个信息差，提供 OpenRouter 公开模型库作为参考：
+
+- **设置 → OpenRouter 模型库 → 「拉取模型列表」**：调用 `https://openrouter.ai/api/v1/models`（公开接口，无需 API Key），精简后写入 `proxy_config.json` 的 `settings.openrouter_models`
+- **编辑模型时**：模型 ID 输入框支持「自动匹配（停手 500ms 后）」+ 「尝试匹配按钮（立即）」，命中后把以下 3 个字段填入「OpenRouter 参考值」分组（仅在字段为空时填入，不覆盖用户已填值）：
+  - **上下文窗口总长** ← `context_length`
+  - **最大输出（参考）** ← `top_provider.max_completion_tokens`
+  - **最大输入（参考）** ← `context_length - max_output_tokens`
+- 模糊匹配：先精确，再忽略厂商前缀匹配（如输入 `gpt-4o` 可命中 `openai/gpt-4o`）
+- 三个字段是「展示型参考值」，用户可自由修改、不影响实际转发行为（实际转发逻辑保持不变）
+- 拉取限流：1 分钟内最多刷新一次，避免误操作
+
 ## 📈 使用统计
 
 每次代理请求（含成功/失败/熔断跳过）都会写入 `stats.db`（SQLite WAL 模式），提供以下维度查询：
@@ -206,6 +225,9 @@ curl http://localhost:8093/v1/chat/completions \
 | DELETE | `/api/models/:id` | 删除模型（同时从所有 group.chain 中移除） |
 | POST | `/api/models/test` | 测试模型端点连通性 |
 | GET | `/api/circuit-breaker` | 获取所有端点的熔断状态 |
+| GET | `/api/openrouter/models` | 获取本地缓存的 OpenRouter 模型库（精简后） |
+| POST | `/api/openrouter/refresh` | 立即拉取 OpenRouter `/api/v1/models` 并落盘（1 分钟限流 1 次） |
+| GET | `/api/openrouter/match?model_id=xxx` | 根据本地模型库匹配单个 model_id（备选，前端默认走本地缓存） |
 | PUT | `/api/config/port` | 修改监听端口 |
 | GET | `/api/proxy-key` | 获取当前代理密钥 |
 | POST | `/api/proxy-key/regenerate` | 重新生成代理密钥 |
@@ -296,7 +318,10 @@ curl http://localhost:8093/v1/chat/completions \
       "thinking_enabled": true,
       "effort": "medium",                 // low | medium | high | max
       "ssl_verify": true,
-      "endpoint_timeout": 30              // 秒
+      "endpoint_timeout": 30,             // 秒
+      "context_length": 64000,            // OpenRouter 参考值（可选）
+      "max_input_tokens": 56000,          // OpenRouter 参考值（可选）
+      "max_output_tokens": 8000           // OpenRouter 参考值（可选）
     }
   ]
 }

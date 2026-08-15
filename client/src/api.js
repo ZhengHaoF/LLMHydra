@@ -96,4 +96,9 @@ export default {
 
   // 测试模型端点
   testModel: (data) => request('/models/test', { method: 'POST', body: JSON.stringify(data) }),
+
+  // OpenRouter 模型库
+  getOpenRouterModels: () => request('/openrouter/models'),
+  refreshOpenRouterModels: () => request('/openrouter/refresh', { method: 'POST' }),
+  matchOpenRouterModel: (modelId) => request(`/openrouter/match?model_id=${encodeURIComponent(modelId)}`),
 }
