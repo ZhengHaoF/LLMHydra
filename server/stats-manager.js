@@ -176,6 +176,7 @@ class StatsManager {
       SELECT
         strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') AS day,
         model_id,
+        (SELECT model_display FROM requests r2 WHERE r2.model_id = requests.model_id ORDER BY r2.ts DESC LIMIT 1) AS model_display,
         COUNT(*) AS requests,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
         SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) AS failure_count,
@@ -186,6 +187,28 @@ class StatsManager {
       WHERE ts >= ?
       GROUP BY day, model_id
       ORDER BY day ASC
+    `).all(since);
+  }
+
+  // 按小时聚合（最近 N 小时）
+  getHourlyStats(hours = 24) {
+    if (!this.db) this.init();
+    if (!this.db) return [];
+    const since = Date.now() - hours * 3600 * 1000;
+    return this.db.prepare(`
+      SELECT
+        strftime('%Y-%m-%d %H:00', ts / 1000, 'unixepoch', 'localtime') AS hour,
+        model_id,
+        (SELECT model_display FROM requests r2 WHERE r2.model_id = requests.model_id ORDER BY r2.ts DESC LIMIT 1) AS model_display,
+        COUNT(*) AS requests,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) AS failure_count,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        ROUND(100.0 * SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate
+      FROM requests
+      WHERE ts >= ?
+      GROUP BY hour, model_id
+      ORDER BY hour ASC
     `).all(since);
   }
 

@@ -39,6 +39,54 @@
             </div>
           </div>
 
+          <!-- 成功率 -->
+          <div class="trend-section">
+            <div class="trend-header">
+              <h3>成功率</h3>
+              <div class="trend-tabs">
+                <button :class="['trend-tab', { active: chartMode === 'hourly' }]" @click="chartMode = 'hourly'">分时</button>
+                <button :class="['trend-tab', { active: chartMode === 'daily' }]" @click="chartMode = 'daily'">分日</button>
+              </div>
+            </div>
+            <div class="trend-chart">
+              <Line v-if="successRateData && successRateData.labels.length" :data="successRateData" :options="successRateOptions" />
+              <div v-else class="empty">暂无数据</div>
+            </div>
+          </div>
+
+          <!-- 模型筛选 -->
+          <div class="model-selector" v-if="availableModels.length > 1">
+            <button class="model-select-all" @click="toggleAllModels">
+              {{ selectedModels.length === availableModels.length ? '取消全选' : '全选' }}
+            </button>
+            <label v-for="m in availableModels" :key="m.model_id" class="model-checkbox">
+              <input type="checkbox" :value="m.model_id" v-model="selectedModels" />
+              <span class="model-checkbox-label">{{ m.model_display || m.model_id }}</span>
+            </label>
+          </div>
+
+          <!-- 调用次数 -->
+          <div class="trend-section">
+            <div class="trend-header">
+              <h3>调用次数</h3>
+            </div>
+            <div class="trend-chart">
+              <Bar v-if="volumeData && volumeData.labels.length" :data="volumeData" :options="volumeOptions" />
+              <div v-else class="empty">暂无数据</div>
+            </div>
+          </div>
+
+          <!-- 调用量 -->
+          <div class="trend-section">
+            <div class="trend-header">
+              <h3>调用量</h3>
+            </div>
+            <div class="trend-chart">
+              <Bar v-if="tokenVolumeData && tokenVolumeData.labels.length" :data="tokenVolumeData" :options="tokenVolumeOptions" />
+              <div v-else class="empty">暂无数据</div>
+            </div>
+          </div>
+
           <!-- 按模型统计 -->
           <div class="models-section">
             <h3>按模型统计</h3>
@@ -175,8 +223,12 @@
 </template>
 
 <script setup>
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import api from '../api.js'
+import { Bar, Line } from 'vue-chartjs'
+import { Chart as ChartJS, Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, LineElement, PointElement } from 'chart.js'
+
+ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, LineElement, PointElement)
 
 const props = defineProps({
   visible: { type: Boolean, default: false }
@@ -194,20 +246,248 @@ const modelStats = ref([])
 const groupStats = ref([])
 const recentRequests = ref([])
 const showConfirm = ref(false)
+const chartMode = ref('hourly')
+const hourlyStats = ref([])
+const dailyStats = ref([])
+const selectedModels = ref([])
 let eventSource = null
+
+const COLOR_PALETTE = [
+  '#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399',
+  '#b37feb', '#36cfc9', '#ff85c0', '#ffc53d', '#73d13d'
+]
+
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+function buildHourLabels(n) {
+  const labels = []
+  const now = new Date()
+  now.setMinutes(0, 0, 0)
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 3600 * 1000)
+    labels.push(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:00`)
+  }
+  return labels
+}
+
+function buildDayLabels(n) {
+  const labels = []
+  const now = new Date()
+  now.setHours(0, 0, 0, 0)
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86400 * 1000)
+    labels.push(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`)
+  }
+  return labels
+}
+
+const availableModels = computed(() => {
+  const rows = chartMode.value === 'hourly' ? hourlyStats.value : dailyStats.value
+  const seen = new Map()
+  for (const r of rows) {
+    if (!seen.has(r.model_id)) {
+      seen.set(r.model_id, { model_id: r.model_id, model_display: r.model_display || '' })
+    }
+  }
+  return [...seen.values()]
+})
+
+watch(availableModels, (models) => {
+  const ids = models.map((m) => m.model_id)
+  // 保留已选中且仍存在的，新出现的自动选中
+  const valid = selectedModels.value.filter((id) => ids.includes(id))
+  const newcomers = ids.filter((id) => !selectedModels.value.includes(id))
+  selectedModels.value = [...valid, ...newcomers]
+}, { immediate: true })
+
+function toggleAllModels() {
+  const ids = availableModels.value.map((m) => m.model_id)
+  selectedModels.value = selectedModels.value.length === ids.length ? [] : ids
+}
+
+// ---- 成功率 ----
+const successRateData = computed(() => {
+  const rows = chartMode.value === 'hourly' ? hourlyStats.value : dailyStats.value
+  if (!rows.length) return null
+  const key = chartMode.value === 'hourly' ? 'hour' : 'day'
+  const labels = chartMode.value === 'hourly' ? buildHourLabels(24) : buildDayLabels(30)
+  const map = {}
+  for (const r of rows) {
+    if (!map[r[key]]) map[r[key]] = { sumRate: 0, sumReq: 0 }
+    const req = r.requests || 0
+    map[r[key]].sumRate += (r.success_rate || 0) * req
+    map[r[key]].sumReq += req
+  }
+  return {
+    labels,
+    datasets: [{
+      label: '成功率',
+      data: labels.map((l) => {
+        const b = map[l]
+        return b && b.sumReq ? +(b.sumRate / b.sumReq).toFixed(2) : 0
+      }),
+      borderColor: '#409eff',
+      backgroundColor: 'rgba(64,158,255,0.1)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 3,
+      pointHoverRadius: 5
+    }]
+  }
+})
+
+const successRateOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      mode: 'index',
+      intersect: false,
+      callbacks: {
+        label: (ctx) => `成功率: ${ctx.parsed.y}%`
+      }
+    }
+  },
+  scales: {
+    x: {
+      ticks: {
+        maxTicksLimit: 12,
+        callback: function (val) {
+          const label = this.getLabelForValue(val)
+          return chartMode.value === 'hourly' ? label.slice(11) : label.slice(5)
+        }
+      }
+    },
+    y: { min: 0, max: 100, ticks: { callback: (v) => v + '%' } }
+  }
+}
+
+// ---- 调用量 ----
+const volumeData = computed(() => {
+  const rows = chartMode.value === 'hourly' ? hourlyStats.value : dailyStats.value
+  if (!rows.length || !selectedModels.value.length) return null
+  const key = chartMode.value === 'hourly' ? 'hour' : 'day'
+  const labels = chartMode.value === 'hourly' ? buildHourLabels(24) : buildDayLabels(30)
+  // model_id → { timeKey → requests }
+  const modelTimeMap = {}
+  for (const r of rows) {
+    if (!selectedModels.value.includes(r.model_id)) continue
+    if (!modelTimeMap[r.model_id]) modelTimeMap[r.model_id] = {}
+    modelTimeMap[r.model_id][r[key]] = (modelTimeMap[r.model_id][r[key]] || 0) + (r.requests || 0)
+  }
+  const selected = availableModels.value.filter((m) => selectedModels.value.includes(m.model_id))
+  return {
+    labels,
+    datasets: selected.map((m, i) => ({
+      label: m.model_display || m.model_id,
+      data: labels.map((l) => (modelTimeMap[m.model_id] || {})[l] || 0),
+      backgroundColor: COLOR_PALETTE[i % COLOR_PALETTE.length],
+      stack: 'volume'
+    }))
+  }
+})
+
+const volumeOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { position: 'bottom' },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y}`
+      }
+    }
+  },
+  scales: {
+    x: {
+      stacked: true,
+      ticks: {
+        maxTicksLimit: 12,
+        callback: function (val) {
+          const label = this.getLabelForValue(val)
+          return chartMode.value === 'hourly' ? label.slice(11) : label.slice(5)
+        }
+      }
+    },
+    y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } }
+  }
+}
+
+// ---- 调用量 (Token) ----
+const tokenVolumeData = computed(() => {
+  const rows = chartMode.value === 'hourly' ? hourlyStats.value : dailyStats.value
+  if (!rows.length || !selectedModels.value.length) return null
+  const key = chartMode.value === 'hourly' ? 'hour' : 'day'
+  const labels = chartMode.value === 'hourly' ? buildHourLabels(24) : buildDayLabels(30)
+  const modelTimeMap = {}
+  for (const r of rows) {
+    if (!selectedModels.value.includes(r.model_id)) continue
+    if (!modelTimeMap[r.model_id]) modelTimeMap[r.model_id] = {}
+    modelTimeMap[r.model_id][r[key]] = (modelTimeMap[r.model_id][r[key]] || 0) + (r.total_tokens || 0)
+  }
+  const selected = availableModels.value.filter((m) => selectedModels.value.includes(m.model_id))
+  return {
+    labels,
+    datasets: selected.map((m, i) => ({
+      label: m.model_display || m.model_id,
+      data: labels.map((l) => (modelTimeMap[m.model_id] || {})[l] || 0),
+      backgroundColor: COLOR_PALETTE[i % COLOR_PALETTE.length],
+      stack: 'volume'
+    }))
+  }
+})
+
+const tokenVolumeOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { position: 'bottom' },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${(ctx.parsed.y / 1e6).toFixed(2)}M`
+      }
+    }
+  },
+  scales: {
+    x: {
+      stacked: true,
+      ticks: {
+        maxTicksLimit: 12,
+        callback: function (val) {
+          const label = this.getLabelForValue(val)
+          return chartMode.value === 'hourly' ? label.slice(11) : label.slice(5)
+        }
+      }
+    },
+    y: {
+      stacked: true,
+      beginAtZero: true,
+      ticks: {
+        callback: (v) => v === 0 ? '0' : (v / 1e6).toFixed(1) + 'M'
+      }
+    }
+  }
+}
 
 async function loadStats() {
   try {
-    const [ov, ms, gs, rr] = await Promise.all([
+    const [ov, ms, gs, rr, hourlyRes, dailyRes] = await Promise.all([
       api.getStatsOverview(),
       api.getStatsModels(),
       api.getStatsGroups(),
-      api.getStatsRecent(50)
+      api.getStatsRecent(50),
+      api.getStatsHourly(24),
+      api.getStatsDaily(30)
     ])
     overview.value = ov
     modelStats.value = ms.models || []
     groupStats.value = gs.groups || []
     recentRequests.value = rr.requests || []
+    hourlyStats.value = hourlyRes.hourly || []
+    dailyStats.value = dailyRes.daily || []
   } catch (e) {
     console.error('加载统计失败:', e)
   }
@@ -367,6 +647,7 @@ function getRateClass(rate) {
 }
 
 .overview-section,
+.trend-section,
 .models-section,
 .groups-section,
 .recent-section {
@@ -374,6 +655,7 @@ function getRateClass(rate) {
 }
 
 .overview-section h3,
+.trend-section h3,
 .models-section h3,
 .groups-section h3,
 .recent-section h3 {
@@ -381,6 +663,99 @@ function getRateClass(rate) {
   font-size: 16px;
   font-weight: 600;
   color: #303133;
+}
+
+.trend-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.trend-header h3 {
+  margin: 0;
+}
+
+.trend-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.trend-tab {
+  padding: 4px 16px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  color: #606266;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.trend-tab:hover {
+  color: #409eff;
+  border-color: #c6e2ff;
+}
+
+.trend-tab.active {
+  background: #409eff;
+  border-color: #409eff;
+  color: #fff;
+}
+
+.trend-chart {
+  height: 300px;
+  width: 100%;
+}
+
+.model-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: #f5f7fa;
+  border-radius: 6px;
+}
+
+.model-select-all {
+  padding: 2px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  color: #606266;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.model-select-all:hover {
+  color: #409eff;
+  border-color: #c6e2ff;
+}
+
+.model-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #606266;
+}
+
+.model-checkbox input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #409eff;
+}
+
+.model-checkbox-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .overview-grid {

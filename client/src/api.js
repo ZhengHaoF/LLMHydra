@@ -84,6 +84,7 @@ export default {
   getStatsGroups: () => request('/stats/groups'),
   getStatsRecent: (limit = 100) => request(`/stats/recent?limit=${limit}`),
   getStatsDaily: (days = 30) => request(`/stats/daily?days=${days}`),
+  getStatsHourly: (hours = 24) => request(`/stats/hourly?hours=${hours}`),
   clearStats: () => request('/stats', { method: 'DELETE' }),
 
   // 设置

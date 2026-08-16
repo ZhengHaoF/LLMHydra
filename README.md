@@ -195,6 +195,7 @@ curl http://localhost:8093/v1/chat/completions \
 | 按模型 | `GET /api/stats/models` | 单模型的成功/失败/跳过/平均延迟/Token/最后使用时间 |
 | 按配置组 | `GET /api/stats/groups` | 单配置组的聚合指标 |
 | 最近请求 | `GET /api/stats/recent?limit=N` | 最近 N 条原始明细 |
+| 按小时聚合 | `GET /api/stats/hourly?hours=N` | 最近 N 小时按小时 + 模型维度聚合 |
 | 按天聚合 | `GET /api/stats/daily?days=N` | 最近 N 天按天 + 模型维度聚合 |
 | 清空 | `DELETE /api/stats` | 一键清空全部统计 |
 
@@ -235,6 +236,7 @@ curl http://localhost:8093/v1/chat/completions \
 | GET | `/api/stats/models` | 按模型聚合 |
 | GET | `/api/stats/groups` | 按配置组聚合 |
 | GET | `/api/stats/recent?limit=N` | 最近请求明细 |
+| GET | `/api/stats/hourly?hours=N` | 按小时聚合 |
 | GET | `/api/stats/daily?days=N` | 按天聚合 |
 | DELETE | `/api/stats` | 清空统计 |
 | GET | `/api/logs` | 获取历史日志缓冲 |

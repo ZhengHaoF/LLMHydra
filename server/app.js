@@ -670,6 +670,11 @@ function createApp(configManager) {
     res.json({ daily: statsManager.getDailyStats(days) });
   });
 
+  api.get('/stats/hourly', (req, res) => {
+    const hours = parseInt(req.query.hours) || 24;
+    res.json({ hourly: statsManager.getHourlyStats(hours) });
+  });
+
   api.delete('/stats', (req, res) => {
     statsManager.clearAll();
     res.json({ success: true });
