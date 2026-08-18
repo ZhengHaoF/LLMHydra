@@ -83,6 +83,8 @@ function normalizeModel(m) {
   if (!out.effort) out.effort = 'medium';
   if (out.ssl_verify === undefined) out.ssl_verify = true;
   if (out.endpoint_timeout === undefined) out.endpoint_timeout = 30;
+  if (out.api_type === undefined) out.api_type = 'openai';
+  if (!['openai', 'anthropic'].includes(out.api_type)) out.api_type = 'openai';
   // OpenRouter 参考值（展示用，可空）
   if (out.context_length !== undefined && out.context_length !== null) {
     const v = parseInt(out.context_length);
@@ -261,6 +263,7 @@ class ConfigManager {
       effort: model.effort,
       ssl_verify: model.ssl_verify,
       endpoint_timeout: model.endpoint_timeout,
+      api_type: model.api_type,
       context_length: model.context_length,
       max_input_tokens: model.max_input_tokens,
       max_output_tokens: model.max_output_tokens
@@ -281,6 +284,12 @@ class ConfigManager {
     if (model.effort !== undefined) existing.effort = model.effort;
     if (model.ssl_verify !== undefined) existing.ssl_verify = model.ssl_verify;
     if (model.endpoint_timeout !== undefined) existing.endpoint_timeout = model.endpoint_timeout;
+    if (model.api_type !== undefined) {
+      if (!['openai', 'anthropic'].includes(model.api_type)) {
+        model.api_type = 'openai';
+      }
+      existing.api_type = model.api_type;
+    }
     // OpenRouter 参考值：null 表示清空，undefined 表示不动
     if (model.context_length !== undefined) {
       if (model.context_length === null) {

@@ -83,8 +83,271 @@ function extractErrorDetail(result) {
   return detail.length > 500 ? detail.slice(0, 500) + '…' : detail;
 }
 
+const ANTHROPIC_TOOL_NAME_INVALID = /[^a-zA-Z0-9_-]/g;
+const ANTHROPIC_TOOL_NAME_MAX = 128;
+
+function sanitizeAnthropicToolName(name) {
+  const base = String(name || '').replace(ANTHROPIC_TOOL_NAME_INVALID, '_').slice(0, ANTHROPIC_TOOL_NAME_MAX);
+  const finalName = base || 'tool';
+  return finalName;
+}
+
+function buildAnthropicToolMaps(tools) {
+  const forward = new Map();
+  const reverse = new Map();
+  const used = new Set();
+  const originalNames = [];
+  for (const t of tools || []) {
+    const name = (t.function && t.function.name) || t.name;
+    if (name) originalNames.push(name);
+  }
+  for (const original of originalNames) {
+    const candidate = sanitizeAnthropicToolName(original);
+    if (candidate === original) {
+      used.add(candidate);
+      forward.set(original, candidate);
+      reverse.set(candidate, original);
+    }
+  }
+  for (const original of originalNames) {
+    if (forward.has(original)) continue;
+    let candidate = sanitizeAnthropicToolName(original);
+    let unique = candidate;
+    let n = 1;
+    while (used.has(unique)) {
+      n += 1;
+      const suffix = `_${n}`;
+      unique = candidate.slice(0, ANTHROPIC_TOOL_NAME_MAX - suffix.length) + suffix;
+    }
+    forward.set(original, unique);
+    reverse.set(unique, original);
+    used.add(unique);
+  }
+  return { forward, reverse };
+}
+
+const RESPONSE_FORMAT_TOOL_NAME = 'json_response_format';
+const ANTHROPIC_DEFAULT_MAX_TOKENS = 4096;
+// reasoning_effort → Anthropic thinking budget（对齐 litellm 默认档位）
+const ANTHROPIC_EFFORT_BUDGETS = { minimal: 128, low: 1024, medium: 2048, high: 4096, xhigh: 8192, max: 16384 };
+
+function sanitizeAnthropicToolUseId(id) {
+  const s = String(id || '').replace(ANTHROPIC_TOOL_NAME_INVALID, '_');
+  return s || 'tool_use_unknown';
+}
+
+// 收集所有 system / developer 消息为 Anthropic system 内容块数组（多条不丢失）
+function collectAnthropicSystemBlocks(messages) {
+  const blocks = [];
+  for (const msg of messages || []) {
+    if (!msg || (msg.role !== 'system' && msg.role !== 'developer')) continue;
+    const texts = extractTextsFromOpenAIContent(msg.content);
+    for (const t of texts) {
+      if (t && t.trim()) blocks.push({ type: 'text', text: t.trim() });
+    }
+  }
+  return blocks;
+}
+
+function extractTextsFromOpenAIContent(content) {
+  if (typeof content === 'string') return [content];
+  if (Array.isArray(content)) {
+    const out = [];
+    for (const part of content) {
+      if (part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string') {
+        out.push(part.text);
+      }
+    }
+    return out;
+  }
+  return [];
+}
+
+// OpenAI content part → Anthropic content block；空 text 块直接丢弃（Anthropic 拒绝空 text）
+function convertOpenAIContentPart(part) {
+  if (!part || typeof part !== 'object') return null;
+  if (part.type === 'text') {
+    if (typeof part.text !== 'string' || !part.text.trim()) return null;
+    return { type: 'text', text: part.text };
+  }
+  if (part.type === 'image_url') {
+    const url = part.image_url && typeof part.image_url.url === 'string' ? part.image_url.url : '';
+    if (!url) return null;
+    if (url.startsWith('data:')) {
+      const m = url.match(/^data:([^;,]+);base64,(.+)$/);
+      if (m) return { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } };
+      return null;
+    }
+    return { type: 'image', source: { type: 'url', url } };
+  }
+  return null;
+}
+
+function convertOpenAIContent(content) {
+  if (typeof content === 'string') {
+    return content.trim() ? [{ type: 'text', text: content }] : [];
+  }
+  if (Array.isArray(content)) {
+    return content.map(convertOpenAIContentPart).filter(Boolean);
+  }
+  return [];
+}
+
+// tool_choice 完整映射：支持裸字符串 "auto"/"none"/"required" 与对象形式，
+// required → any；parallel_tool_calls → disable_parallel_tool_use（语义取反）
+function mapAnthropicToolChoice(tc, toolNameMap, parallelToolCalls, hasTools) {
+  let mapped = null;
+  if (typeof tc === 'string') {
+    if (tc === 'none') mapped = { type: 'none' };
+    else if (tc === 'required') mapped = { type: 'any' };
+    else mapped = { type: 'auto' };
+  } else if (tc && typeof tc === 'object') {
+    if (tc.type === 'function' && tc.function && tc.function.name) {
+      const originalName = tc.function.name;
+      const name = toolNameMap && toolNameMap.forward ? (toolNameMap.forward.get(originalName) || originalName) : originalName;
+      mapped = { type: 'tool', name };
+    } else if (tc.type === 'none') {
+      mapped = { type: 'none' };
+    } else if (tc.type === 'required' || tc.type === 'any') {
+      mapped = { type: 'any' };
+    } else {
+      mapped = { type: 'auto' };
+    }
+  }
+  if (!mapped) {
+    // 仅有 parallel_tool_calls 且已定义工具时才生成 tool_choice，避免无 tools 时发 tool_choice 报错
+    if (typeof parallelToolCalls === 'boolean' && hasTools) mapped = { type: 'auto' };
+    else return undefined;
+  }
+  if (typeof parallelToolCalls === 'boolean' && mapped.type !== 'none') {
+    mapped.disable_parallel_tool_use = !parallelToolCalls;
+  }
+  return mapped;
+}
+
+function mapAnthropicFinishReason(reason) {
+  if (reason === 'tool_use') return 'tool_calls';
+  if (reason === 'max_tokens') return 'length';
+  if (reason === 'refusal' || reason === 'content_filtered') return 'content_filter';
+  return 'stop';
+}
+
+function anthropicUsageToOpenAI(usage) {
+  if (!usage) return null;
+  const prompt = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+  const completion = usage.output_tokens || 0;
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion
+  };
+}
+
+// 入参为已解析的 OpenAI 请求体对象，返回 { body: Anthropic 请求体, responseFormatTool: 是否注入了 JSON 格式工具 }
+function convertOpenAIToAnthropicBody(json, toolNameMap) {
+  const anthropic = {
+    model: json.model,
+    max_tokens: json.max_tokens || json.max_completion_tokens || ANTHROPIC_DEFAULT_MAX_TOKENS,
+    messages: [],
+    metadata: { user_id: json.user || undefined }
+  };
+  if (json.temperature !== undefined) anthropic.temperature = json.temperature;
+  if (json.top_p !== undefined) anthropic.top_p = json.top_p;
+  if (json.stop) anthropic.stop_sequences = Array.isArray(json.stop) ? json.stop : [json.stop];
+  if (json.stream) anthropic.stream = true;
+  const systemBlocks = collectAnthropicSystemBlocks(json.messages || []);
+  if (systemBlocks.length) anthropic.system = systemBlocks;
+  if (Array.isArray(json.tools) && json.tools.length) {
+    anthropic.tools = json.tools.map((tool) => {
+      const originalName = (tool.function && tool.function.name) || tool.name;
+      const mappedName = toolNameMap && toolNameMap.forward ? toolNameMap.forward.get(originalName) || originalName : originalName;
+      return {
+        name: mappedName,
+        description: (tool.function && tool.function.description) || tool.description || '',
+        input_schema: (tool.function && tool.function.parameters) || tool.parameters || { type: 'object' }
+      };
+    });
+  }
+  const hasTools = Array.isArray(anthropic.tools) && anthropic.tools.length > 0;
+  const toolChoice = mapAnthropicToolChoice(json.tool_choice, toolNameMap, json.parallel_tool_calls, hasTools);
+  if (toolChoice) anthropic.tool_choice = toolChoice;
+
+  // Anthropic 只有 user/assistant 两种角色，且必须严格交替：
+  // tool 消息（tool_result）归入 user 侧，连续同角色消息合并为一条
+  const pushBlocks = (role, blocks) => {
+    if (blocks.length) anthropic.messages.push({ role, content: blocks });
+  };
+  const userBlocks = [];
+  const assistantBlocks = [];
+  for (const msg of json.messages || []) {
+    if (!msg || typeof msg !== 'object') continue;
+    if (msg.role === 'system' || msg.role === 'developer') continue;
+    if (msg.role === 'user') {
+      pushBlocks('assistant', assistantBlocks.splice(0));
+      userBlocks.push(...convertOpenAIContent(msg.content));
+    } else if (msg.role === 'tool') {
+      pushBlocks('assistant', assistantBlocks.splice(0));
+      userBlocks.push({
+        type: 'tool_result',
+        tool_use_id: sanitizeAnthropicToolUseId(msg.tool_call_id),
+        content: typeof msg.content === 'string'
+          ? msg.content
+          : (Array.isArray(msg.content) ? convertOpenAIContent(msg.content) : JSON.stringify(msg.content || ''))
+      });
+    } else if (msg.role === 'assistant') {
+      pushBlocks('user', userBlocks.splice(0));
+      assistantBlocks.push(...convertOpenAIContent(msg.content));
+      if (Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          const originalName = (tc.function && tc.function.name) || tc.name;
+          // 历史消息中的工具名同样要走正向映射，与工具定义保持一致
+          const mappedName = toolNameMap && toolNameMap.forward ? toolNameMap.forward.get(originalName) || originalName : originalName;
+          let input = {};
+          if (tc.function && typeof tc.function.arguments === 'string' && tc.function.arguments.trim()) {
+            try {
+              input = JSON.parse(tc.function.arguments);
+            } catch (e) {
+              throw new Error(`tool_call "${originalName}" arguments 不是合法 JSON: ${e.message}`);
+            }
+          }
+          assistantBlocks.push({
+            type: 'tool_use',
+            id: sanitizeAnthropicToolUseId(tc.id),
+            name: mappedName,
+            input
+          });
+        }
+      }
+    }
+  }
+  pushBlocks('user', userBlocks);
+  pushBlocks('assistant', assistantBlocks);
+
+  // response_format（JSON mode）→ 注入强制 JSON 工具；响应侧再解包回 content。
+  // 注意：强制 tool_choice 与 thinking 互斥，thinking 注入处会检查 responseFormatTool
+  let responseFormatTool = false;
+  const rf = json.response_format;
+  if (rf && (rf.type === 'json_object' || rf.type === 'json_schema')) {
+    let schema = { type: 'object', properties: {} };
+    if (rf.type === 'json_schema' && rf.json_schema && rf.json_schema.schema && typeof rf.json_schema.schema === 'object') {
+      schema = { ...rf.json_schema.schema };
+      if (schema.type !== 'object') schema = { type: 'object', properties: { result: schema } };
+    }
+    if (!Array.isArray(anthropic.tools)) anthropic.tools = [];
+    anthropic.tools.push({
+      name: RESPONSE_FORMAT_TOOL_NAME,
+      description: 'Respond ONLY with a JSON object that satisfies the schema. Do not add any natural-language explanation.',
+      input_schema: schema
+    });
+    anthropic.tool_choice = { type: 'tool', name: RESPONSE_FORMAT_TOOL_NAME };
+    responseFormatTool = true;
+  }
+
+  return { body: anthropic, responseFormatTool };
+}
+
 // 尝试一个模型（重试链上的一个节点）
-function tryModel({ model, method, targetPath, baseHeaders, body, timeoutMs }) {
+function tryModel({ model, method, targetPath, baseHeaders, body, timeoutMs, anthropic }) {
   return new Promise((resolve) => {
     const endpoint = model.endpoint;
     if (!endpoint || !endpoint.url) {
@@ -104,6 +367,10 @@ function tryModel({ model, method, targetPath, baseHeaders, body, timeoutMs }) {
     reqHeaders['content-length'] = Buffer.byteLength(body);
     if (apiKey) {
       reqHeaders['authorization'] = `Bearer ${apiKey}`;
+    }
+    // 官方 Anthropic API 强制要求 anthropic-version 头（客户端未提供时补默认值）
+    if (anthropic && !reqHeaders['anthropic-version']) {
+      reqHeaders['anthropic-version'] = '2023-06-01';
     }
 
     const upstreamOpts = {
@@ -281,7 +548,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         });
         continue;
       }
-      const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + pathNoQuery + query;
+      let targetPath = upstreamUrl.pathname.replace(/\/$/, '') + pathNoQuery + query;
 
       // 替换 model 字段为实际的 model_id
       let body = rawBody;
@@ -293,18 +560,52 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         } catch (e) { /* pass through */ }
       }
 
-      // thinking 注入：每个端点用各自的 model 配置
+      // Anthropic 协议转换：改 body 和上游路径
+      const anthropic = model.api_type === 'anthropic';
+      let toolNameMap = null;
+      let hasResponseFormatTool = false;
+      let clientThinkingBudget = null;
+      if (anthropic && body) {
+        try {
+          const openAI = JSON.parse(body);
+          if (openAI.thinking && typeof openAI.thinking.budget_tokens === 'number') {
+            clientThinkingBudget = openAI.thinking.budget_tokens;
+          }
+          toolNameMap = buildAnthropicToolMaps(openAI.tools);
+          const converted = convertOpenAIToAnthropicBody(openAI, toolNameMap);
+          hasResponseFormatTool = converted.responseFormatTool;
+          body = JSON.stringify(converted.body);
+          targetPath = upstreamUrl.pathname.replace(/\/v1$/, '').replace(/\/$/, '') + '/v1/messages' + query;
+        } catch (e) {
+          log(`[FAIL]  model #${i + 1} (${model.display_name}) Anthropic 请求转换失败: ${e.message}`);
+          const headers = { 'Content-Type': 'application/json' };
+          res.writeHead(502, headers);
+          res.end(JSON.stringify({ error: 'Anthropic request conversion failed', detail: e.message }));
+          return;
+        }
+      }
+
+      // thinking 注入：Anthropic 用 thinking.budget_tokens，OpenAI 用 reasoning_effort
       if (model.thinking_enabled && body) {
         try {
           const json = JSON.parse(body);
-          const userBudget = json.thinking && json.thinking.budget_tokens;
-          json.thinking = { type: 'enabled' };
-          if (userBudget) json.thinking.budget_tokens = userBudget;
-          json.reasoning_effort = model.effort || 'medium';
-          if (Array.isArray(json.messages)) {
-            for (const msg of json.messages) {
-              if (msg.role === 'assistant' && typeof msg.reasoning_content !== 'string') {
-                msg.reasoning_content = '';
+          if (anthropic) {
+            // Anthropic 不允许 thinking 与强制 tool_choice（JSON 工具）同时使用
+            if (!hasResponseFormatTool) {
+              const budget = clientThinkingBudget || ANTHROPIC_EFFORT_BUDGETS[model.effort] || ANTHROPIC_EFFORT_BUDGETS.medium;
+              let maxTokens = typeof json.max_tokens === 'number' ? json.max_tokens : ANTHROPIC_DEFAULT_MAX_TOKENS;
+              // Anthropic 要求 max_tokens > budget_tokens
+              if (maxTokens <= budget) maxTokens = budget + 1;
+              json.max_tokens = maxTokens;
+              json.thinking = { type: 'enabled', budget_tokens: budget };
+            }
+          } else {
+            json.reasoning_effort = model.effort || 'medium';
+            if (Array.isArray(json.messages)) {
+              for (const msg of json.messages) {
+                if (msg.role === 'assistant' && typeof msg.reasoning_content !== 'string') {
+                  msg.reasoning_content = '';
+                }
               }
             }
           }
@@ -312,7 +613,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         } catch (e) { /* pass through */ }
       }
 
-      log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  try #${i + 1}/${models.length}  -> ${upstreamUrl.origin + targetPath}`);
+      log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  try #${i + 1}/${models.length}  -> ${upstreamUrl.origin + targetPath}  api=${model.api_type || 'openai'}`);
 
       const timeoutMs = (model.endpoint_timeout || 30) * 1000;
       const modelStart = Date.now();
@@ -323,13 +624,14 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         targetPath,
         baseHeaders,
         body,
-        timeoutMs
+        timeoutMs,
+        anthropic
       });
 
       if (result.ok) {
         circuitBreaker.recordSuccess(model.id);
         log(`[OK]    model #${i + 1} (${model.display_name}) status=${result.statusCode}`);
-        const relayResult = await relayUpstream(result.upstreamRes, res, isStream);
+        const relayResult = await relayUpstream(result.upstreamRes, res, isStream, anthropic, toolNameMap, hasResponseFormatTool);
         const latency = Date.now() - modelStart;
         const usage = relayResult && relayResult.usage ? relayResult.usage : null;
         recordStats({
@@ -359,6 +661,8 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         } catch {
           payload = { error: result.body || result.reason || 'upstream 4xx' };
         }
+        // Anthropic 上游错误统一转成 OpenAI error 格式再返回客户端
+        if (anthropic) payload = convertAnthropicErrorToOpenAI(payload);
         res.end(JSON.stringify(payload));
         recordStats({
           group_id: groupId,
@@ -393,19 +697,22 @@ function createProxyMiddleware(configManager, circuitBreaker) {
   };
 }
 
-function relayUpstream(upstreamRes, clientRes, isStream) {
+function relayUpstream(upstreamRes, clientRes, isStream, anthropic, toolNameMap, responseFormatTool) {
   const ct = upstreamRes.headers['content-type'] || '';
 
-  if (isStream && ct.includes('text/event-stream')) {
+  if (ct.includes('text/event-stream')) {
     const rh = {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
       'connection': 'keep-alive'
     };
     clientRes.writeHead(upstreamRes.statusCode, rh);
+    if (anthropic) {
+      return handleAnthropicSSE(upstreamRes, clientRes, toolNameMap, responseFormatTool);
+    }
     return handleSSE(upstreamRes, clientRes);
   } else if (ct.includes('application/json')) {
-    return handleNonStreaming(upstreamRes, clientRes, upstreamRes.statusCode);
+    return handleNonStreaming(upstreamRes, clientRes, upstreamRes.statusCode, anthropic, toolNameMap, responseFormatTool);
   } else {
     return new Promise((resolve) => {
       const rh = { ...upstreamRes.headers };
@@ -428,6 +735,267 @@ function relayUpstream(upstreamRes, clientRes, isStream) {
       });
     });
   }
+}
+
+function handleAnthropicSSE(upstreamRes, clientRes, toolNameMap, responseFormatTool) {
+  const reverse = toolNameMap && toolNameMap.reverse ? toolNameMap.reverse : new Map();
+  const chatcmplId = 'chatcmpl-' + Math.random().toString(36).slice(2, 10);
+  const created = Math.floor(Date.now() / 1000);
+  let model = '';
+  let usage = null; // Anthropic 字段名（input_tokens 等），结束时转成 OpenAI 字段名
+  let blockIndex = -1;
+  let toolCounter = -1; // OpenAI tool_calls 的 index 只对 tool_use 块计数
+  const blocks = [];
+  let stopReason = null;
+  let streamEnded = false;
+  let roleSent = false;
+
+  function ensureRole() {
+    if (roleSent) return;
+    roleSent = true;
+    clientRes.write('data: ' + JSON.stringify({
+      id: chatcmplId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: { role: 'assistant', content: null },
+          finish_reason: null
+        }
+      ]
+    }) + '\n\n');
+  }
+
+  function sendDelta(delta) {
+    const chunk = {
+      id: chatcmplId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta,
+          finish_reason: null
+        }
+      ]
+    };
+    clientRes.write('data: ' + JSON.stringify(chunk) + '\n\n');
+  }
+
+  function sendToolName(index) {
+    const block = blocks[index];
+    if (!block || block.type !== 'tool_use' || block.nameSent) return;
+    block.nameSent = true;
+    const originalName = reverse.get(block.name) || block.name;
+    sendDelta({
+      role: null,
+      content: null,
+      tool_calls: [
+        {
+          index: block.toolIndex,
+          id: block.id,
+          type: 'function',
+          function: { name: originalName, arguments: '' }
+        }
+      ]
+    });
+  }
+
+  function sendArgumentsDelta(index, input) {
+    const block = blocks[index];
+    if (!block || block.type !== 'tool_use') return;
+    sendDelta({
+      role: null,
+      content: null,
+      tool_calls: [
+        {
+          index: block.toolIndex,
+          type: 'function',
+          function: { name: null, arguments: input }
+        }
+      ]
+    });
+  }
+
+  let finishSent = false;
+  function sendFinish() {
+    if (finishSent) return;
+    finishSent = true;
+    // JSON 工具模式下输出已解包为正文，finish_reason 固定为 stop
+    const mapped = responseFormatTool ? 'stop' : mapAnthropicFinishReason(stopReason);
+    const chunk = {
+      id: chatcmplId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: mapped
+        }
+      ]
+    };
+    clientRes.write('data: ' + JSON.stringify(chunk) + '\n\n');
+  }
+
+  return new Promise((resolve) => {
+    let buffer = '';
+    const onClientClose = () => {
+      if (!upstreamRes.destroyed) upstreamRes.destroy();
+    };
+    clientRes.on('close', onClientClose);
+
+    upstreamRes.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        // 过滤 event:/注释 等非 data 行：OpenAI 客户端只解析 data: 行，
+        // 透传 Anthropic 的 event: 行会导致客户端流解析失败
+        if (!trimmed.startsWith('data: ')) {
+          continue;
+        }
+
+        const raw = trimmed.slice(6).trim();
+        if (raw === '[DONE]') {
+          if (!streamEnded) {
+            streamEnded = true;
+            sendFinish();
+            clientRes.write('data: [DONE]\n\n');
+          }
+          continue;
+        }
+
+        let data;
+        try { data = JSON.parse(raw); } catch (_) {
+          try { clientRes.write(trimmed + '\n'); } catch (_) {}
+          continue;
+        }
+        if (!data || typeof data !== 'object') {
+          try { clientRes.write(trimmed + '\n'); } catch (_) {}
+          continue;
+        }
+
+        if (data.type === 'message_start') {
+          model = (data.message && data.message.model) || model;
+          usage = data.message && data.message.usage ? { ...data.message.usage } : null;
+          ensureRole();
+        }
+
+        if (data.type === 'content_block_start') {
+          blockIndex += 1;
+          const blockType = (data.content_block && data.content_block.type) || 'text';
+          const block = {
+            index: blockIndex,
+            type: blockType,
+            name: data.content_block && data.content_block.name ? data.content_block.name : '',
+            id: data.content_block && data.content_block.id ? data.content_block.id : '',
+            input: '',
+            toolIndex: 0,
+            nameSent: false,
+            isResponseFormat: false
+          };
+          if (blockType === 'tool_use') {
+            toolCounter += 1;
+            block.toolIndex = toolCounter;
+            block.isResponseFormat = responseFormatTool && block.name === RESPONSE_FORMAT_TOOL_NAME;
+          }
+          blocks.push(block);
+          if (blockType === 'tool_use' && !block.isResponseFormat) {
+            sendToolName(blockIndex);
+          }
+        }
+
+        if (data.type === 'content_block_delta') {
+          const delta = data.delta || {};
+          if (typeof delta.text === 'string' && delta.text) {
+            sendDelta({ content: delta.text });
+          }
+          if (typeof delta.thinking === 'string' && delta.thinking) {
+            sendDelta({ reasoning_content: delta.thinking });
+          }
+          if (typeof delta.partial_json === 'string' && delta.partial_json) {
+            const current = blocks[blockIndex];
+            if (current && current.type === 'tool_use') {
+              current.input += delta.partial_json;
+              if (current.isResponseFormat) {
+                // JSON 工具模式：参数增量直接作为正文输出
+                sendDelta({ content: delta.partial_json });
+              } else {
+                sendArgumentsDelta(blockIndex, delta.partial_json);
+              }
+            }
+          }
+        }
+
+        if (data.type === 'content_block_stop') {
+          const current = blocks[blockIndex];
+          if (current && current.type === 'tool_use' && !current.isResponseFormat && current.input === '') {
+            sendArgumentsDelta(blockIndex, '{}');
+          }
+        }
+
+        if (data.type === 'message_delta') {
+          if (data.usage) usage = { ...(usage || {}), ...data.usage };
+          if (typeof data.delta?.stop_reason === 'string' && data.delta.stop_reason) {
+            stopReason = data.delta.stop_reason;
+            sendFinish();
+          }
+        }
+
+        if (data.type === 'error' && !streamEnded) {
+          streamEnded = true;
+          const errMsg = data.error && data.error.message ? data.error.message : 'Anthropic upstream error';
+          clientRes.write('data: ' + JSON.stringify({
+            error: {
+              message: errMsg,
+              type: data.error && data.error.type ? data.error.type : 'api_error'
+            }
+          }) + '\n\n');
+          clientRes.end();
+          clientRes.removeListener('close', onClientClose);
+          resolve({ usage: anthropicUsageToOpenAI(usage), error: true });
+          try { upstreamRes.destroy(); } catch (_) {}
+          return;
+        }
+
+        if (data.type === 'message_stop') {
+          streamEnded = true;
+          sendFinish();
+          clientRes.write('data: [DONE]\n\n');
+        }
+      }
+    });
+
+    upstreamRes.on('end', () => {
+      if (buffer) {
+        const line = buffer.trim();
+        if (line) {
+          try { clientRes.write(line + '\n'); } catch (_) {}
+        }
+      }
+      if (!streamEnded) {
+        sendFinish();
+        clientRes.write('data: [DONE]\n\n');
+      }
+      clientRes.end();
+      clientRes.removeListener('close', onClientClose);
+      resolve({ usage: anthropicUsageToOpenAI(usage) });
+    });
+
+    upstreamRes.on('error', () => {
+      if (!clientRes.writableEnded) clientRes.end();
+      clientRes.removeListener('close', onClientClose);
+      resolve({ usage: anthropicUsageToOpenAI(usage), error: true });
+    });
+  });
 }
 
 function handleSSE(upstreamRes, clientRes) {
@@ -487,20 +1055,129 @@ function handleSSE(upstreamRes, clientRes) {
   });
 }
 
-function handleNonStreaming(upstreamRes, clientRes, statusCode) {
+function convertAnthropicToOpenAIResponse(body, toolNameMap, responseFormatTool) {
+  const msg = body;
+  const reverse = toolNameMap && toolNameMap.reverse ? toolNameMap.reverse : new Map();
+  const toolCalls = [];
+  let text = '';
+  let reasoning = '';
+  if (Array.isArray(msg.content)) {
+    for (const block of msg.content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text') {
+        text += block.text || '';
+      } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+        const thinking = block.thinking || '';
+        if (thinking) reasoning += thinking;
+      } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
+        // JSON 工具模式：把注入工具的 input 解包回正文
+        if (responseFormatTool && block.name === RESPONSE_FORMAT_TOOL_NAME) {
+          text += JSON.stringify(block.input || {});
+          continue;
+        }
+        toolCalls.push({
+          id: block.id,
+          type: 'function',
+          function: {
+            name: reverse.get(block.name) || block.name,
+            arguments: JSON.stringify(block.input || {})
+          }
+        });
+      }
+    }
+  }
+
+  let finishReason = mapAnthropicFinishReason(msg.stop_reason);
+  if (responseFormatTool) finishReason = 'stop';
+
+  const message = {
+    role: 'assistant',
+    content: text || null,
+    reasoning_content: reasoning || null,
+    tool_calls: toolCalls.length ? toolCalls : undefined
+  };
+
+  const usageObj = msg.usage || {};
+  let promptTokens = usageObj.input_tokens || 0;
+  const cacheCreation = usageObj.cache_creation_input_tokens || 0;
+  const cacheRead = usageObj.cache_read_input_tokens || 0;
+  promptTokens += cacheCreation + cacheRead;
+  const completionTokens = usageObj.output_tokens || 0;
+  const totalTokens = promptTokens + completionTokens;
+  let reasoningTokens = 0;
+  if (reasoning) {
+    reasoningTokens = Math.max(0, Math.min(Math.ceil(reasoning.length / 4), completionTokens));
+  }
+
+  const openAI = {
+    id: msg.id && String(msg.id).startsWith('msg_') ? 'chatcmpl-' + String(msg.id).slice(4) : 'chatcmpl-' + Math.random().toString(36).slice(2, 10),
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: msg.model || '',
+    choices: [
+      {
+        index: 0,
+        message,
+        finish_reason: finishReason
+      }
+    ],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: totalTokens,
+      prompt_tokens_details: {
+        cached_tokens: cacheRead,
+        cache_creation_tokens: cacheCreation
+      },
+      completion_tokens_details: {
+        reasoning_tokens: reasoningTokens
+      }
+    }
+  };
+  return openAI;
+}
+
+function convertAnthropicErrorToOpenAI(body) {
+  if (!body || !body.error) return { error: { message: 'Unknown upstream error', type: 'api_error' } };
+  const err = body.error;
+  if (typeof err === 'string') return { error: { message: err, type: 'api_error' } };
+  return {
+    error: {
+      message: typeof err.message === 'string' ? err.message : 'Upstream error',
+      type: typeof err.type === 'string' ? err.type : 'api_error'
+    }
+  };
+}
+
+function handleNonStreaming(upstreamRes, clientRes, statusCode, anthropic, toolNameMap, responseFormatTool) {
   return new Promise((resolve) => {
     let body = '';
     let usage = null;
     upstreamRes.on('data', c => body += c.toString());
     upstreamRes.on('end', () => {
       let responseBody = body;
+      let data;
       try {
-        const data = JSON.parse(body);
-        if (data.usage) usage = data.usage;
-        if (data.choices && Array.isArray(data.choices)) {
-          responseBody = JSON.stringify(data);
+        data = JSON.parse(body);
+      } catch (e) {
+        data = null;
+      }
+      if (data) {
+        if (anthropic) {
+          if (data.error) {
+            responseBody = JSON.stringify(convertAnthropicErrorToOpenAI(data));
+          } else if (data.type === 'message') {
+            const converted = convertAnthropicToOpenAIResponse(data, toolNameMap, responseFormatTool);
+            responseBody = JSON.stringify(converted);
+            usage = converted.usage;
+          }
+        } else {
+          if (data.usage) usage = data.usage;
+          if (data.choices && Array.isArray(data.choices)) {
+            responseBody = JSON.stringify(data);
+          }
         }
-      } catch (e) { /* not JSON */ }
+      }
 
       const headers = { ...upstreamRes.headers };
       delete headers['transfer-encoding'];
@@ -782,7 +1459,7 @@ function createApp(configManager) {
 
   // ---- 测试模型端点 ----
   api.post('/models/test', async (req, res) => {
-    const { endpoint, model_id, thinking_enabled, effort, ssl_verify, endpoint_timeout } = req.body;
+    const { endpoint, model_id, thinking_enabled, effort, ssl_verify, endpoint_timeout, api_type } = req.body;
 
     if (!endpoint || !endpoint.url) {
       return res.status(400).json({ error: '缺少端点 URL' });
@@ -797,23 +1474,31 @@ function createApp(configManager) {
     } catch (e) {
       return res.status(400).json({ error: '无效的端点 URL' });
     }
-    const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + '/chat/completions';
+    const anthropic = api_type === 'anthropic';
+    const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + (anthropic ? '/v1/messages' : '/chat/completions');
     const proto = upstreamUrl.protocol === 'https:' ? https : http;
     const apiKey = (endpoint.api_key || '').trim();
 
-    // 构造测试请求体
     const testBody = {
       model: model_id,
       messages: [{ role: 'user', content: 'Hi' }],
       max_tokens: 50
     };
 
+    let bodyStr = anthropic ? JSON.stringify(convertOpenAIToAnthropicBody(testBody, buildAnthropicToolMaps([])).body) : JSON.stringify(testBody);
     if (thinking_enabled) {
-      testBody.thinking = { type: 'enabled' };
-      testBody.reasoning_effort = effort || 'medium';
+      const tmp = JSON.parse(bodyStr);
+      if (anthropic) {
+        const budget = ANTHROPIC_EFFORT_BUDGETS[effort] || ANTHROPIC_EFFORT_BUDGETS.medium;
+        let maxTokens = typeof tmp.max_tokens === 'number' ? tmp.max_tokens : ANTHROPIC_DEFAULT_MAX_TOKENS;
+        if (maxTokens <= budget) maxTokens = budget + 1;
+        tmp.max_tokens = maxTokens;
+        tmp.thinking = { type: 'enabled', budget_tokens: budget };
+      } else {
+        tmp.reasoning_effort = effort || 'medium';
+      }
+      bodyStr = JSON.stringify(tmp);
     }
-
-    const bodyStr = JSON.stringify(testBody);
 
     const reqHeaders = {
       'Content-Type': 'application/json',
@@ -821,6 +1506,9 @@ function createApp(configManager) {
     };
     if (apiKey) {
       reqHeaders['Authorization'] = `Bearer ${apiKey}`;
+    }
+    if (anthropic) {
+      reqHeaders['anthropic-version'] = '2023-06-01';
     }
 
     const upstreamOpts = {
@@ -877,10 +1565,17 @@ function createApp(configManager) {
         upstreamReq.end();
       });
 
+      let response = result.body;
+      if (anthropic && response && response.type === 'message') {
+        response = convertAnthropicToOpenAIResponse(response, buildAnthropicToolMaps([]), false);
+      } else if (anthropic && response && response.error) {
+        response = convertAnthropicErrorToOpenAI(response);
+      }
+
       res.json({
         success: result.status >= 200 && result.status < 300,
         status: result.status,
-        response: result.body,
+        response,
         error: result.error
       });
     } catch (err) {

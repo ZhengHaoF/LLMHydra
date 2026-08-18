@@ -70,7 +70,13 @@
 
     <div class="form-group">
       <label>上游接口</label>
-      <input v-model="form.endpoint.url" placeholder="https://api.example.com/v1" />
+      <div class="endpoint-row">
+        <input v-model="form.endpoint.url" placeholder="https://api.example.com/v1" class="endpoint-input" />
+        <select v-model="form.api_type" class="protocol-select">
+          <option value="openai">OpenAI协议（/v1/chat/completions）</option>
+          <option value="anthropic">Anthropic协议（/v1/messages）</option>
+        </select>
+      </div>
     </div>
 
     <div class="form-group">
@@ -196,6 +202,7 @@ const form = reactive({
   effort: 'medium',
   ssl_verify: true,
   endpoint_timeout: 30,
+  api_type: 'openai',
   // OpenRouter 参考值
   context_length: null,
   max_input_tokens: null,
@@ -231,6 +238,7 @@ watch(() => props.model, (val) => {
     effort: val.effort || 'medium',
     ssl_verify: val.ssl_verify !== false,
     endpoint_timeout: val.endpoint_timeout !== undefined ? val.endpoint_timeout : 30,
+    api_type: ['openai', 'anthropic'].includes(val.api_type) ? val.api_type : 'openai',
     context_length: val.context_length ?? null,
     max_input_tokens: val.max_input_tokens ?? null,
     max_output_tokens: val.max_output_tokens ?? null
@@ -359,6 +367,7 @@ function handleSave() {
     effort: form.effort,
     ssl_verify: form.ssl_verify,
     endpoint_timeout: form.endpoint_timeout,
+    api_type: form.api_type,
     context_length: form.context_length,
     max_input_tokens: form.max_input_tokens,
     max_output_tokens: form.max_output_tokens
@@ -380,7 +389,8 @@ async function handleTest() {
       thinking_enabled: form.thinking_enabled,
       effort: form.effort,
       ssl_verify: form.ssl_verify,
-      endpoint_timeout: form.endpoint_timeout
+      endpoint_timeout: form.endpoint_timeout,
+      api_type: form.api_type
     });
     testResult.value = data;
   } catch (err) {
@@ -564,6 +574,43 @@ function formatResponse(val) {
   border-radius: 3px;
   outline: none;
   cursor: pointer;
+}
+
+/* 上游接口行：URL 输入框 + 协议类型选择 */
+.endpoint-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.endpoint-row .endpoint-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+  background: #fff;
+  box-sizing: border-box;
+}
+.endpoint-row .endpoint-input:focus {
+  border-color: #409eff;
+}
+.endpoint-row .protocol-select {
+  flex-shrink: 0;
+  width: auto;
+  padding: 8px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #606266;
+  outline: none;
+  cursor: pointer;
+  background: #fff;
+}
+.endpoint-row .protocol-select:focus {
+  border-color: #409eff;
 }
 .timeout-field {
   display: flex;
