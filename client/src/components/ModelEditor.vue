@@ -73,8 +73,8 @@
       <div class="endpoint-row">
         <input v-model="form.endpoint.url" placeholder="https://api.example.com/v1" class="endpoint-input" />
         <select v-model="form.api_type" class="protocol-select">
-          <option value="openai">OpenAI协议（/v1/chat/completions）</option>
-          <option value="anthropic">Anthropic协议（/v1/messages）</option>
+          <option value="openai">OpenAI协议（/chat/completions）</option>
+          <option value="anthropic">Anthropic协议（/messages）</option>
         </select>
       </div>
     </div>
@@ -100,6 +100,17 @@
       <label class="checkbox">
         <input type="checkbox" v-model="form.ssl_verify" />
         <span>SSL 验证</span>
+      </label>
+
+      <label class="timeout-field" title="请求失败后在同一端点最多重试的次数，0 表示不重试">
+        <span>重试次数</span>
+        <input
+          v-model.number="form.max_retries"
+          type="number"
+          min="0"
+          max="10"
+          class="timeout-input"
+        />
       </label>
 
       <label class="timeout-field">
@@ -202,6 +213,7 @@ const form = reactive({
   effort: 'medium',
   ssl_verify: true,
   endpoint_timeout: 30,
+  max_retries: 1,
   api_type: 'openai',
   // OpenRouter 参考值
   context_length: null,
@@ -238,6 +250,7 @@ watch(() => props.model, (val) => {
     effort: val.effort || 'medium',
     ssl_verify: val.ssl_verify !== false,
     endpoint_timeout: val.endpoint_timeout !== undefined ? val.endpoint_timeout : 30,
+    max_retries: val.max_retries !== undefined ? val.max_retries : 1,
     api_type: ['openai', 'anthropic'].includes(val.api_type) ? val.api_type : 'openai',
     context_length: val.context_length ?? null,
     max_input_tokens: val.max_input_tokens ?? null,
@@ -367,6 +380,7 @@ function handleSave() {
     effort: form.effort,
     ssl_verify: form.ssl_verify,
     endpoint_timeout: form.endpoint_timeout,
+    max_retries: form.max_retries,
     api_type: form.api_type,
     context_length: form.context_length,
     max_input_tokens: form.max_input_tokens,

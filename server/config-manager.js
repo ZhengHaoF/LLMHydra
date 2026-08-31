@@ -13,7 +13,8 @@
 //       thinking_enabled: true,
 //       effort: "max",
 //       ssl_verify: true,
-//       endpoint_timeout: 30
+//       endpoint_timeout: 30,
+//       max_retries: 1
 //     }
 //   ]
 // }
@@ -22,7 +23,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const CONFIG_FILE = path.join(__dirname, '..', 'proxy_config.json');
+// 可通过环境变量 CONFIG_FILE 指定配置文件位置（部署目录只读时的兜底，与 STATS_DB_PATH 一致）
+const CONFIG_FILE = process.env.CONFIG_FILE || path.join(__dirname, '..', 'proxy_config.json');
 
 const DEFAULT_SETTINGS = {
   circuit_breaker_threshold: 3,
@@ -83,6 +85,9 @@ function normalizeModel(m) {
   if (!out.effort) out.effort = 'medium';
   if (out.ssl_verify === undefined) out.ssl_verify = true;
   if (out.endpoint_timeout === undefined) out.endpoint_timeout = 30;
+  // 单模型最大重试次数：0 = 不重试（每次请求对该端点只尝试 1 次）
+  if (out.max_retries === undefined) out.max_retries = 1;
+  if (typeof out.max_retries !== 'number' || !Number.isFinite(out.max_retries) || out.max_retries < 0) out.max_retries = 1;
   if (out.api_type === undefined) out.api_type = 'openai';
   if (!['openai', 'anthropic'].includes(out.api_type)) out.api_type = 'openai';
   // OpenRouter 参考值（展示用，可空）
@@ -263,6 +268,7 @@ class ConfigManager {
       effort: model.effort,
       ssl_verify: model.ssl_verify,
       endpoint_timeout: model.endpoint_timeout,
+      max_retries: model.max_retries,
       api_type: model.api_type,
       context_length: model.context_length,
       max_input_tokens: model.max_input_tokens,
@@ -284,6 +290,10 @@ class ConfigManager {
     if (model.effort !== undefined) existing.effort = model.effort;
     if (model.ssl_verify !== undefined) existing.ssl_verify = model.ssl_verify;
     if (model.endpoint_timeout !== undefined) existing.endpoint_timeout = model.endpoint_timeout;
+    if (model.max_retries !== undefined) {
+      const r = parseInt(model.max_retries);
+      existing.max_retries = Number.isFinite(r) && r >= 0 ? r : 1;
+    }
     if (model.api_type !== undefined) {
       if (!['openai', 'anthropic'].includes(model.api_type)) {
         model.api_type = 'openai';

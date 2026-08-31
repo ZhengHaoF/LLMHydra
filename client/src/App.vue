@@ -56,7 +56,6 @@
           <ModelLibrary
             :models="models"
             :current-chain="currentChainIds"
-            :other-chains="otherChainIdsList"
             :stats-map="statsMap"
             @add="openAddModel"
             @edit="openEditModel"
@@ -234,13 +233,6 @@ const tokenTooltip = computed(() => {
 })
 
 const currentChainIds = computed(() => activeGroup.value ? activeGroup.value.chain : [])
-
-const otherChainIdsList = computed(() => {
-  const curId = activeGroup.value ? activeGroup.value.id : null
-  return groups.value
-    .filter((g) => g.id !== curId)
-    .map((g) => g.chain)
-})
 
 const statsMap = computed(() => {
   const map = {}

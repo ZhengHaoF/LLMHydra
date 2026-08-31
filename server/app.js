@@ -361,9 +361,20 @@ function tryModel({ model, method, targetPath, baseHeaders, body, timeoutMs, ant
     delete reqHeaders.host;
     delete reqHeaders['content-length'];
     delete reqHeaders['accept-encoding'];
+    // 转发时清理客户端的分块编码头：代理会重写 content-length，
+    // 同时带 transfer-encoding + content-length 会被上游判定为非法请求（400）
+    delete reqHeaders['transfer-encoding'];
     // 上游有自己的 api_key 才设置 Authorization；
     // 否则删除客户端带来的授权头，避免把代理密钥转发给上游
     delete reqHeaders.authorization;
+    // 同时清理其它常见鉴权头：客户端（如 Cherry Studio 等）可能同时携带
+    // x-api-key / api-key，其值是代理密钥而非上游密钥；若原样透传，部分上游
+    // （如 tokenrhythm）会同时校验 Authorization 与 x-api-key，两值不一致时
+    // 直接返回 400 AUTH_HEADER_CONFLICT（“两个鉴权请求头中的 API Key 不一致”）
+    delete reqHeaders['x-api-key'];
+    delete reqHeaders['api-key'];
+    delete reqHeaders['x-goog-api-key'];
+    delete reqHeaders['x-auth-token'];
     reqHeaders['content-length'] = Buffer.byteLength(body);
     if (apiKey) {
       reqHeaders['authorization'] = `Bearer ${apiKey}`;
@@ -575,7 +586,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
           const converted = convertOpenAIToAnthropicBody(openAI, toolNameMap);
           hasResponseFormatTool = converted.responseFormatTool;
           body = JSON.stringify(converted.body);
-          targetPath = upstreamUrl.pathname.replace(/\/v1$/, '').replace(/\/$/, '') + '/v1/messages' + query;
+          targetPath = upstreamUrl.pathname.replace(/\/$/, '') + '/messages' + query;
         } catch (e) {
           log(`[FAIL]  model #${i + 1} (${model.display_name}) Anthropic 请求转换失败: ${e.message}`);
           const headers = { 'Content-Type': 'application/json' };
@@ -613,57 +624,83 @@ function createProxyMiddleware(configManager, circuitBreaker) {
         } catch (e) { /* pass through */ }
       }
 
-      log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  try #${i + 1}/${models.length}  -> ${upstreamUrl.origin + targetPath}  api=${model.api_type || 'openai'}`);
-
       const timeoutMs = (model.endpoint_timeout || 30) * 1000;
+      // 单模型最多尝试次数 = 首次 1 次 + 最大重试次数（默认重试 1 次，即最多尝试 2 次）
+      const maxRetries = Number.isFinite(model.max_retries) ? Math.max(0, Math.floor(model.max_retries)) : 1;
+      const attempts = 1 + maxRetries;
       const modelStart = Date.now();
 
-      const result = await tryModel({
-        model,
-        method: req.method,
-        targetPath,
-        baseHeaders,
-        body,
-        timeoutMs,
-        anthropic
-      });
+      // 内层循环：同一模型先重试 attempts 次，全部失败才切下一个模型
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  attempt ${attempt}/${attempts}  -> ${upstreamUrl.origin + targetPath}  api=${model.api_type || 'openai'}`);
 
-      if (result.ok) {
-        circuitBreaker.recordSuccess(model.id);
-        log(`[OK]    model #${i + 1} (${model.display_name}) status=${result.statusCode}`);
-        const relayResult = await relayUpstream(result.upstreamRes, res, isStream, anthropic, toolNameMap, hasResponseFormatTool);
-        const latency = Date.now() - modelStart;
-        const usage = relayResult && relayResult.usage ? relayResult.usage : null;
-        recordStats({
-          group_id: groupId,
-          model_id: model.id,
-          model_display: model.display_name,
-          path: pathNoQuery,
-          status: 'success',
-          status_code: result.statusCode,
-          prompt_tokens: usage ? (usage.prompt_tokens || 0) : 0,
-          completion_tokens: usage ? (usage.completion_tokens || 0) : 0,
-          total_tokens: usage ? (usage.total_tokens || 0) : 0,
-          latency_ms: latency
+        const result = await tryModel({
+          model,
+          method: req.method,
+          targetPath,
+          baseHeaders,
+          body,
+          timeoutMs,
+          anthropic
         });
-        return;
-      }
 
-      const latency = Date.now() - modelStart;
-      const errDetail = extractErrorDetail(result);
-      if (!result.retryable) {
-        log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — not retryable, abort.${errDetail ? ` upstream: ${errDetail}` : ''}`);
-        const headers = { 'Content-Type': 'application/json' };
-        res.writeHead(result.statusCode || 502, headers);
-        let payload;
-        try {
-          payload = result.body ? JSON.parse(result.body) : { error: result.reason || 'upstream 4xx' };
-        } catch {
-          payload = { error: result.body || result.reason || 'upstream 4xx' };
+        if (result.ok) {
+          circuitBreaker.recordSuccess(model.id);
+          log(`[OK]    model #${i + 1} (${model.display_name}) status=${result.statusCode}${attempt > 1 ? ` (attempt ${attempt}/${attempts})` : ''}`);
+          const relayResult = await relayUpstream(result.upstreamRes, res, isStream, anthropic, toolNameMap, hasResponseFormatTool);
+          const latency = Date.now() - modelStart;
+          const usage = relayResult && relayResult.usage ? relayResult.usage : null;
+          recordStats({
+            group_id: groupId,
+            model_id: model.id,
+            model_display: model.display_name,
+            path: pathNoQuery,
+            status: 'success',
+            status_code: result.statusCode,
+            prompt_tokens: usage ? (usage.prompt_tokens || 0) : 0,
+            completion_tokens: usage ? (usage.completion_tokens || 0) : 0,
+            total_tokens: usage ? (usage.total_tokens || 0) : 0,
+            latency_ms: latency
+          });
+          return;
         }
-        // Anthropic 上游错误统一转成 OpenAI error 格式再返回客户端
-        if (anthropic) payload = convertAnthropicErrorToOpenAI(payload);
-        res.end(JSON.stringify(payload));
+
+        const errDetail = extractErrorDetail(result);
+        if (!result.retryable) {
+          log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — not retryable, abort.${errDetail ? ` upstream: ${errDetail}` : ''}`);
+          const headers = { 'Content-Type': 'application/json' };
+          res.writeHead(result.statusCode || 502, headers);
+          let payload;
+          try {
+            payload = result.body ? JSON.parse(result.body) : { error: result.reason || 'upstream 4xx' };
+          } catch {
+            payload = { error: result.body || result.reason || 'upstream 4xx' };
+          }
+          // Anthropic 上游错误统一转成 OpenAI error 格式再返回客户端
+          if (anthropic) payload = convertAnthropicErrorToOpenAI(payload);
+          res.end(JSON.stringify(payload));
+          recordStats({
+            group_id: groupId,
+            model_id: model.id,
+            model_display: model.display_name,
+            path: pathNoQuery,
+            status: 'failure',
+            status_code: result.statusCode,
+            latency_ms: Date.now() - modelStart,
+            error: errDetail || result.reason || `HTTP ${result.statusCode}`
+          });
+          return;
+        }
+
+        if (attempt < attempts) {
+          // 还有剩余重试次数：不触发熔断计数、不写统计，仅记录日志后重试
+          log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} attempt ${attempt}/${attempts} — retry.${errDetail ? ` upstream: ${errDetail}` : ''}`);
+          continue;
+        }
+
+        // 重试耗尽：熔断按“轮次”计一次（避免单请求内多次重试放大熔断计数），写统计后切下一个模型
+        circuitBreaker.recordFailure(model.id);
+        log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} attempt ${attempt}/${attempts} — try next.${errDetail ? ` upstream: ${errDetail}` : ''}`);
         recordStats({
           group_id: groupId,
           model_id: model.id,
@@ -671,24 +708,11 @@ function createProxyMiddleware(configManager, circuitBreaker) {
           path: pathNoQuery,
           status: 'failure',
           status_code: result.statusCode,
-          latency_ms: latency,
-          error: errDetail || result.reason || `HTTP ${result.statusCode}`
+          latency_ms: Date.now() - modelStart,
+          error: result.reason || `HTTP ${result.statusCode}`
         });
-        return;
+        break;
       }
-
-      circuitBreaker.recordFailure(model.id);
-      log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — try next.${errDetail ? ` upstream: ${errDetail}` : ''}`);
-      recordStats({
-        group_id: groupId,
-        model_id: model.id,
-        model_display: model.display_name,
-        path: pathNoQuery,
-        status: 'failure',
-        status_code: result.statusCode,
-        latency_ms: latency,
-        error: result.reason || `HTTP ${result.statusCode}`
-      });
     }
 
     log(`[ALL-FAIL] ${models.length} model(s) exhausted for group "${groupId}"`);
@@ -1475,7 +1499,7 @@ function createApp(configManager) {
       return res.status(400).json({ error: '无效的端点 URL' });
     }
     const anthropic = api_type === 'anthropic';
-    const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + (anthropic ? '/v1/messages' : '/chat/completions');
+    const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + (anthropic ? '/messages' : '/chat/completions');
     const proto = upstreamUrl.protocol === 'https:' ? https : http;
     const apiKey = (endpoint.api_key || '').trim();
 

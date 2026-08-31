@@ -21,17 +21,16 @@
         v-for="m in filteredModels"
         :key="m.id"
         class="lib-item"
-        :class="{ inChain: isInAnyChain(m.id) }"
+        :class="{ inChain: isInChain(m.id) }"
         draggable="true"
         @dragstart="onDragStart($event, m.id)"
         @click="$emit('edit', m.id)"
-        :title="isInAnyChain(m.id) ? '已在此或其他配置组的链中 · 点击编辑' : '点击编辑 · 拖到画布加入链路'"
+        :title="isInChain(m.id) ? '已在当前配置组的链中 · 点击编辑' : '点击编辑 · 拖到画布加入链路'"
       >
         <div class="lib-item-name">{{ m.display_name || m.name || '未命名' }}</div>
         <div class="lib-item-meta">
           <span class="badge endpoint-host">{{ endpointHost(m.endpoint) }}</span>
           <span v-if="isInChain(m.id)" class="badge in-chain">当前组</span>
-          <span v-else-if="isInOtherChain(m.id)" class="badge other-chain">其他组</span>
           <span v-if="getStats(m.id)" class="badge stats">{{ getStats(m.id) }}</span>
         </div>
         <button class="lib-del" @click.stop="pendingDelete = m.id" title="删除模型"><IconX :size="13" /></button>
@@ -63,7 +62,6 @@ import { IconX } from '@tabler/icons-vue'
 const props = defineProps({
   models: { type: Array, default: () => [] },
   currentChain: { type: Array, default: () => [] }, // 当前画布上的 model id 列表
-  otherChains: { type: Array, default: () => [] },   // 其他配置组的 chain（model id 列表）
   statsMap: { type: Object, default: () => ({}) }    // model_id -> { total_requests, total_tokens }
 })
 
@@ -94,14 +92,6 @@ function onDragStart(e, modelId) {
 
 function isInChain(id) {
   return props.currentChain.includes(id)
-}
-
-function isInOtherChain(id) {
-  return !isInChain(id) && props.otherChains.some((arr) => arr.includes(id))
-}
-
-function isInAnyChain(id) {
-  return isInChain(id) || isInOtherChain(id)
 }
 
 function getModelName(id) {
@@ -255,10 +245,6 @@ function confirmDelete() {
 .badge.in-chain {
   background: #f0f9eb;
   color: #67c23a;
-}
-.badge.other-chain {
-  background: #fdf6ec;
-  color: #e6a23c;
 }
 .badge.stats {
   background: #ecf5ff;
