@@ -28,9 +28,9 @@ function formatLogTime(date = new Date()) {
   }).format(date);
 }
 
-function log(msg) {
+function log(msg, groupId) {
   console.log(`[${formatLogTime()}] ${msg}`);
-  logManager.append(msg);
+  logManager.append(msg, groupId);
 }
 
 // 记录统计并广播统计更新事件（前端通过 SSE 收到后自动刷新）
@@ -531,7 +531,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       if (!circuitBreaker.isAvailable(model.id)) {
         const state = circuitBreaker.states.get(model.id);
         const until = state ? new Date(state.circuitOpenUntil).toISOString() : '';
-        log(`[SKIP]  model #${i + 1} (${model.display_name}) — circuit breaker open until ${until}`);
+        log(`[SKIP]  model #${i + 1} (${model.display_name}) — circuit breaker open until ${until}`, groupId);
         recordStats({
           group_id: groupId,
           model_id: model.id,
@@ -548,7 +548,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       try {
         upstreamUrl = new URL(model.endpoint.url);
       } catch (e) {
-        log(`[FAIL]  model #${i + 1} (${model.display_name}) — 无效端点 URL，跳过`);
+        log(`[FAIL]  model #${i + 1} (${model.display_name}) — 无效端点 URL，跳过`, groupId);
         recordStats({
           group_id: groupId,
           model_id: model.id,
@@ -588,7 +588,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
           body = JSON.stringify(converted.body);
           targetPath = upstreamUrl.pathname.replace(/\/$/, '') + '/messages' + query;
         } catch (e) {
-          log(`[FAIL]  model #${i + 1} (${model.display_name}) Anthropic 请求转换失败: ${e.message}`);
+          log(`[FAIL]  model #${i + 1} (${model.display_name}) Anthropic 请求转换失败: ${e.message}`, groupId);
           const headers = { 'Content-Type': 'application/json' };
           res.writeHead(502, headers);
           res.end(JSON.stringify({ error: 'Anthropic request conversion failed', detail: e.message }));
@@ -632,7 +632,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
 
       // 内层循环：同一模型先重试 attempts 次，全部失败才切下一个模型
       for (let attempt = 1; attempt <= attempts; attempt++) {
-        log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  attempt ${attempt}/${attempts}  -> ${upstreamUrl.origin + targetPath}  api=${model.api_type || 'openai'}`);
+        log(`${req.method} ${pathNoQuery}  [group=${groupId}/${model.display_name}]  attempt ${attempt}/${attempts}  -> ${upstreamUrl.origin + targetPath}  api=${model.api_type || 'openai'}`, groupId);
 
         const result = await tryModel({
           model,
@@ -646,7 +646,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
 
         if (result.ok) {
           circuitBreaker.recordSuccess(model.id);
-          log(`[OK]    model #${i + 1} (${model.display_name}) status=${result.statusCode}${attempt > 1 ? ` (attempt ${attempt}/${attempts})` : ''}`);
+          log(`[OK]    model #${i + 1} (${model.display_name}) status=${result.statusCode}${attempt > 1 ? ` (attempt ${attempt}/${attempts})` : ''}`, groupId);
           const relayResult = await relayUpstream(result.upstreamRes, res, isStream, anthropic, toolNameMap, hasResponseFormatTool);
           const latency = Date.now() - modelStart;
           const usage = relayResult && relayResult.usage ? relayResult.usage : null;
@@ -667,7 +667,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
 
         const errDetail = extractErrorDetail(result);
         if (!result.retryable) {
-          log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — not retryable, abort.${errDetail ? ` upstream: ${errDetail}` : ''}`);
+          log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} — not retryable, abort.${errDetail ? ` upstream: ${errDetail}` : ''}`, groupId);
           const headers = { 'Content-Type': 'application/json' };
           res.writeHead(result.statusCode || 502, headers);
           let payload;
@@ -694,13 +694,13 @@ function createProxyMiddleware(configManager, circuitBreaker) {
 
         if (attempt < attempts) {
           // 还有剩余重试次数：不触发熔断计数、不写统计，仅记录日志后重试
-          log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} attempt ${attempt}/${attempts} — retry.${errDetail ? ` upstream: ${errDetail}` : ''}`);
+          log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} attempt ${attempt}/${attempts} — retry.${errDetail ? ` upstream: ${errDetail}` : ''}`, groupId);
           continue;
         }
 
         // 重试耗尽：熔断按“轮次”计一次（避免单请求内多次重试放大熔断计数），写统计后切下一个模型
         circuitBreaker.recordFailure(model.id);
-        log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} attempt ${attempt}/${attempts} — try next.${errDetail ? ` upstream: ${errDetail}` : ''}`);
+        log(`[FAIL]  model #${i + 1} (${model.display_name}) ${result.statusCode || ''} attempt ${attempt}/${attempts} — try next.${errDetail ? ` upstream: ${errDetail}` : ''}`, groupId);
         recordStats({
           group_id: groupId,
           model_id: model.id,
@@ -715,7 +715,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
       }
     }
 
-    log(`[ALL-FAIL] ${models.length} model(s) exhausted for group "${groupId}"`);
+    log(`[ALL-FAIL] ${models.length} model(s) exhausted for group "${groupId}"`, groupId);
     res.writeHead(502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'All models in chain failed', group: groupId, models_tried: models.length }));
   };
@@ -1220,6 +1220,11 @@ function handleNonStreaming(upstreamRes, clientRes, statusCode, anthropic, toolN
 // ---- 创建应用 ----
 
 function createApp(configManager) {
+  // 为已有配置组预创建独立日志缓冲（新增组时在 API 路由里 ensureGroup）
+  for (const g of configManager.getConfig().groups) {
+    logManager.ensureGroup(g.id);
+  }
+
   const app = express();
 
   // 安全头
@@ -1288,6 +1293,8 @@ function createApp(configManager) {
     }
     try {
       const g = configManager.addGroup(id, name);
+      logManager.ensureGroup(g.id);
+      log(`[系统] 新增配置组: ${g.id}`);
       res.json({ success: true, group: g });
     } catch (e) {
       res.status(400).json({ error: e.message });
@@ -1307,6 +1314,8 @@ function createApp(configManager) {
     if (!configManager.deleteGroup(id)) {
       return res.status(404).json({ error: 'Group not found' });
     }
+    logManager.removeGroup(id);
+    log(`[系统] 删除配置组: ${id}`);
     res.json({ success: true });
   });
 
@@ -1382,8 +1391,10 @@ function createApp(configManager) {
   });
 
   // ---- 日志 ----
+  // group 参数：指定配置组 ID；不传或为空返回系统日志
   api.get('/logs', (req, res) => {
-    res.json({ logs: logManager.getRecent() });
+    const group = (req.query.group || '').trim() || undefined;
+    res.json({ logs: logManager.getRecent(group) });
   });
 
   api.get('/logs/stream', (req, res) => {
@@ -1409,7 +1420,8 @@ function createApp(configManager) {
   });
 
   api.delete('/logs', (req, res) => {
-    logManager.clear();
+    const group = (req.query.group || '').trim() || undefined;
+    logManager.clear(group);
     res.json({ success: true });
   });
 

@@ -104,6 +104,8 @@
             />
             <LogPanel
               :collapsed="logCollapsed"
+              :groups="groups"
+              :active-group-id="activeGroupId"
               @toggle="logCollapsed = !logCollapsed"
             />
           </div>

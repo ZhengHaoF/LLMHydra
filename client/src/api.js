@@ -74,9 +74,9 @@ export default {
   // 重启
   restart: () => request('/restart', { method: 'POST' }),
 
-  // 日志
-  getLogs: () => request('/logs'),
-  clearLogs: () => request('/logs', { method: 'DELETE' }),
+  // 日志（group 为配置组 ID；不传返回系统日志）
+  getLogs: (group) => request(`/logs${group ? `?group=${encodeURIComponent(group)}` : ''}`),
+  clearLogs: (group) => request(`/logs${group ? `?group=${encodeURIComponent(group)}` : ''}`, { method: 'DELETE' }),
 
   // 统计
   getStatsOverview: () => request('/stats/overview'),
