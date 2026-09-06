@@ -65,6 +65,41 @@
               <span v-else-if="orSuccess" class="or-success">{{ orSuccess }}</span>
             </div>
           </div>
+
+          <div class="section">
+            <h3>管理密码</h3>
+            <p class="section-desc">
+              管理面板一旦被攻破，攻击者即可拿到全部上游 API Key。公网部署时请使用强密码：至少 12 位，且包含字母、数字、符号中的两类。
+            </p>
+
+            <div class="form-group">
+              <label>当前密码</label>
+              <input type="password" v-model="pwd.current" class="pw-input" autocomplete="current-password" />
+            </div>
+            <div class="form-group">
+              <label>新密码</label>
+              <input
+                type="password"
+                v-model="pwd.next"
+                class="pw-input"
+                autocomplete="new-password"
+                placeholder="至少 12 位，含字母 + 数字或符号"
+              />
+            </div>
+            <div class="form-group">
+              <label>确认新密码</label>
+              <input type="password" v-model="pwd.confirm" class="pw-input" autocomplete="new-password" />
+            </div>
+
+            <div class="or-actions">
+              <button class="btn-primary" @click="changePassword" :disabled="pwdSaving">
+                {{ pwdSaving ? '修改中...' : '修改密码' }}
+              </button>
+              <span v-if="pwdError" class="or-error">{{ pwdError }}</span>
+              <span v-else-if="pwdSuccess" class="or-success">{{ pwdSuccess }}</span>
+            </div>
+            <p v-if="pwdSuccess" class="pw-note">其他设备上的登录会话已失效，需要重新登录。</p>
+          </div>
         </div>
 
         <div class="modal-footer">
@@ -102,6 +137,53 @@ const orCached = ref({ fetched_at: null, count: 0, models: [] })
 const refreshing = ref(false)
 const orError = ref('')
 const orSuccess = ref('')
+
+// 管理密码修改
+const pwd = ref({ current: '', next: '', confirm: '' })
+const pwdSaving = ref(false)
+const pwdError = ref('')
+const pwdSuccess = ref('')
+
+function resetPwdForm() {
+  pwd.value = { current: '', next: '', confirm: '' }
+  pwdError.value = ''
+  pwdSuccess.value = ''
+}
+
+async function changePassword() {
+  pwdError.value = ''
+  pwdSuccess.value = ''
+
+  if (!pwd.value.current) {
+    pwdError.value = '请输入当前密码'
+    return
+  }
+  if (pwd.value.next.length < 12) {
+    pwdError.value = '新密码至少 12 位'
+    return
+  }
+  if (pwd.value.next !== pwd.value.confirm) {
+    pwdError.value = '两次输入的新密码不一致'
+    return
+  }
+
+  pwdSaving.value = true
+  try {
+    const res = await api.changeAdminPassword(pwd.value.current, pwd.value.next)
+    if (res && res.success) {
+      // 服务端已作废全部旧会话并签发新 token，本地同步更新以维持当前登录态
+      if (res.token) api.setToken(res.token)
+      resetPwdForm()
+      pwdSuccess.value = '密码已更新'
+    } else {
+      pwdError.value = (res && res.error) || '修改失败'
+    }
+  } catch (e) {
+    pwdError.value = e.message || '修改失败'
+  } finally {
+    pwdSaving.value = false
+  }
+}
 
 async function loadSettings() {
   try {
@@ -158,6 +240,7 @@ watch(() => props.visible, (val) => {
   if (val) {
     loadSettings()
     loadOpenRouterStatus()
+    resetPwdForm()
   }
 })
 
@@ -395,5 +478,27 @@ async function save() {
 .or-success {
   font-size: 12px;
   color: #67c23a;
+}
+
+.pw-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 14px;
+  color: #303133;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+
+.pw-input:focus {
+  border-color: #409eff;
+}
+
+.pw-note {
+  margin: 10px 0 0 0;
+  font-size: 12px;
+  color: #e6a23c;
 }
 </style>

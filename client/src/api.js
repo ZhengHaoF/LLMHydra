@@ -43,12 +43,22 @@ function encodeId(id) {
 }
 
 export default {
-  // 登录
+  // 登录（成功后返回随机会话 token，不再是密码明文）
   login: (password) => fetch(`${BASE}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password })
   }).then(res => res.json()),
+
+  // 登出：通知服务端作废当前会话 token（只在服务端生效，localStorage 由调用方清）
+  logout: () => request('/logout', { method: 'POST' }),
+
+  // 修改管理密码；成功后返回新会话 token（旧会话全部作废）
+  changeAdminPassword: (currentPassword, newPassword) =>
+    request('/admin/password', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+    }),
 
   // Token 管理
   setToken,

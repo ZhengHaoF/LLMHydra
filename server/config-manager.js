@@ -39,6 +39,33 @@ function generateAdminPassword() {
   return crypto.randomBytes(16).toString('base64url');
 }
 
+// 管理密码强度校验：管理面板一旦被攻破，全部上游 API Key 都会泄漏，
+// 因此这里要求比普通口令更严格。
+const MIN_ADMIN_PASSWORD_LENGTH = 12;
+
+function validateAdminPassword(password) {
+  if (typeof password !== 'string' || password.length < MIN_ADMIN_PASSWORD_LENGTH) {
+    return { ok: false, reason: `管理密码至少 ${MIN_ADMIN_PASSWORD_LENGTH} 位` };
+  }
+  if (password.length > 128) {
+    return { ok: false, reason: '管理密码过长（最多 128 位）' };
+  }
+  // 至少包含字母与数字两类字符
+  const hasLetter = /[a-zA-Z]/.test(password);
+  const hasDigit = /\d/.test(password);
+  const hasSymbol = /[^a-zA-Z0-9]/.test(password);
+  const classes = [hasLetter, hasDigit, hasSymbol].filter(Boolean).length;
+  if (classes < 2) {
+    return { ok: false, reason: '管理密码需至少包含字母、数字、符号中的两类' };
+  }
+  return { ok: true };
+}
+
+// 判断现有密码是否为弱口令（仅用于启动告警，不阻止启动）
+function isWeakAdminPassword(password) {
+  return !validateAdminPassword(password).ok;
+}
+
 const DEFAULT_CONFIG = {
   port: 8093,
   settings: { ...DEFAULT_SETTINGS },
@@ -408,7 +435,26 @@ class ConfigManager {
     this._ensureConfig();
     return this._config.settings.admin_password;
   }
+
+  // 修改管理密码（调用方需先完成强度校验）
+  setAdminPassword(newPassword) {
+    this._ensureConfig();
+    this._config.settings.admin_password = newPassword;
+    this.save();
+    return this._config.settings.admin_password;
+  }
+
+  // 生成并保存一个强随机管理密码，返回新密码
+  regenerateAdminPassword() {
+    this._ensureConfig();
+    this._config.settings.admin_password = generateAdminPassword();
+    this.save();
+    return this._config.settings.admin_password;
+  }
 }
 
 module.exports = ConfigManager;
 module.exports.isValidGroupId = isValidGroupId;
+module.exports.validateAdminPassword = validateAdminPassword;
+module.exports.isWeakAdminPassword = isWeakAdminPassword;
+module.exports.MIN_ADMIN_PASSWORD_LENGTH = MIN_ADMIN_PASSWORD_LENGTH;

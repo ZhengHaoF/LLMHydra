@@ -332,7 +332,13 @@ async function doLogin() {
   }
 }
 
-function doLogout() {
+async function doLogout() {
+  // 通知服务端作废当前会话 token；仅清 localStorage 的话 token 在服务端依然有效
+  try {
+    await api.logout()
+  } catch (e) {
+    // 服务端已不可用（如正在重启）时忽略，本地状态仍要清干净
+  }
   api.clearToken()
   authenticated.value = false
   if (statsTimer) {

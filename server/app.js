@@ -6,9 +6,10 @@ const rateLimit = require('express-rate-limit');
 const http = require('http');
 const https = require('https');
 const path = require('path');
+const crypto = require('crypto');
 const { URL } = require('url');
 const { spawn } = require('child_process');
-const { isValidGroupId } = require('./config-manager');
+const { isValidGroupId, validateAdminPassword } = require('./config-manager');
 const CircuitBreaker = require('./circuit-breaker');
 const statsManager = require('./stats-manager');
 const logManager = require('./log-manager');
@@ -17,6 +18,97 @@ const openrouter = require('./openrouter');
 // SSE 连接数限制
 const MAX_SSE_CONNECTIONS = 10;
 let currentSSEConnections = 0;
+
+// ---- 密钥安全 ----
+
+// 管理会话有效期（12 小时）；会话只存内存，重启后需重新登录
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+// 管理会话表：token -> 过期时间戳
+const adminSessions = new Map();
+
+// GET /api/config 对密钥字段返回的掩码；前端原样回传时表示"不修改"
+const SECRET_MASK = '__LLMHYDRA_UNCHANGED__';
+
+// 定时安全比较：先比长度再比内容，避免通过响应耗时逐字节试探密钥
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  // timingSafeEqual 要求等长，长度不等时再比一次同长度哈希，保证耗时可比
+  if (bufA.length !== bufB.length) {
+    const ha = crypto.createHash('sha256').update(bufA).digest();
+    const hb = crypto.createHash('sha256').update(bufB).digest();
+    return crypto.timingSafeEqual(ha, hb);
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// 创建管理会话；返回随机 token 与过期时间
+function createAdminSession() {
+  // 清掉已过期的会话，避免表无限增长
+  const now = Date.now();
+  for (const [t, exp] of adminSessions) {
+    if (exp <= now) adminSessions.delete(t);
+  }
+  const token = crypto.randomBytes(32).toString('base64url');
+  const expiresAt = now + SESSION_TTL_MS;
+  adminSessions.set(token, expiresAt);
+  return { token, expiresAt };
+}
+
+function isValidAdminSession(token) {
+  if (!token) return false;
+  const expiresAt = adminSessions.get(token);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    adminSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function destroyAdminSession(token) {
+  if (token) adminSessions.delete(token);
+}
+
+// 定期清理过期会话（避免长期运行后表膨胀）
+const sessionCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [t, exp] of adminSessions) {
+    if (exp <= now) adminSessions.delete(t);
+  }
+}, 60 * 60 * 1000);
+if (sessionCleanupTimer.unref) sessionCleanupTimer.unref();
+
+// 对配置中的密钥字段做脱敏：GET /api/config 不再返回真实密钥
+// 前端原样回传掩码时，保存逻辑会保留原值，不会把掩码写进配置
+function maskConfig(config) {
+  if (!config || typeof config !== 'object') return config;
+  const out = { ...config };
+  out.models = (Array.isArray(config.models) ? config.models : []).map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    const apiKey = m.endpoint && typeof m.endpoint.api_key === 'string' ? m.endpoint.api_key : '';
+    return {
+      ...m,
+      endpoint: { ...m.endpoint, api_key: apiKey ? SECRET_MASK : '' }
+    };
+  });
+  if (out.settings && typeof out.settings === 'object') {
+    out.settings = {
+      ...out.settings,
+      proxy_key: out.settings.proxy_key ? SECRET_MASK : '',
+      admin_password: out.settings.admin_password ? SECRET_MASK : ''
+    };
+  }
+  return out;
+}
+
+// 保存模型/设置时，把掩码还原为"不修改"：
+// - 只要值是掩码，就沿用原值（模型不存在时视为空字符串）
+function unmaskSecret(value, original) {
+  if (value === SECRET_MASK) return original || '';
+  return value;
+}
 
 function formatLogTime(date = new Date()) {
   return new Intl.DateTimeFormat('en-GB', {
@@ -458,7 +550,7 @@ function createProxyMiddleware(configManager, circuitBreaker) {
     const settings = configManager.getSettings();
     const auth = req.headers['authorization'] || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-    if (!token || token !== settings.proxy_key) {
+    if (!token || !safeEqual(token, settings.proxy_key)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Invalid proxy key' }));
     }
@@ -1241,10 +1333,23 @@ function createApp(configManager) {
     legacyHeaders: false
   });
 
-  // 管理 API 鉴权中间件
-  const adminAuth = (req, res, next) => {
-    const adminPassword = configManager.getAdminPassword();
+  // 登录接口限流：公网部署下这是唯一暴露在鉴权之外的入口，必须严防暴力破解
+  // 只统计失败请求（skipSuccessfulRequests），正常用户几乎不受影响
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,  // 15 分钟
+    max: 10,  // 每个 IP 最多 10 次失败登录
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: true,
+    handler: (req, res) => {
+      log(`[SECURITY] 登录失败次数过多，已限流 IP: ${req.ip}`);
+      res.status(429).json({ error: '登录尝试过于频繁，请 15 分钟后重试' });
+    }
+  });
 
+  // 管理 API 鉴权中间件：只认登录时签发的会话 token，不再接受明文管理密码
+  // （旧版本 token 就是密码本身，一旦泄漏等于永久交出管理员权限）
+  const adminAuth = (req, res, next) => {
     // 优先从 Authorization header 取，其次从 query string 取（SSE 不支持自定义 header）
     let token = '';
     const authHeader = req.headers['authorization'];
@@ -1258,7 +1363,7 @@ function createApp(configManager) {
       return res.status(401).json({ error: 'Missing admin token' });
     }
 
-    if (token !== adminPassword) {
+    if (!isValidAdminSession(token)) {
       return res.status(401).json({ error: 'Invalid admin token' });
     }
 
@@ -1275,9 +1380,49 @@ function createApp(configManager) {
   api.use(adminAuth);
   api.use(express.json({ limit: '10mb' }));
 
-  // 整体配置（管理 API 已有 admin 鉴权，无需脱敏）
+  // ---- 会话与安全 ----
+
+  // 登出：立即失效调用方的会话 token（前端退出登录时调用）
+  // 旧版本前端只清 localStorage，token 在服务端依然有效，退出等于没退
+  api.post('/logout', (req, res) => {
+    const authHeader = req.headers['authorization'];
+    let token = '';
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    } else if (req.query && req.query.token) {
+      token = req.query.token;
+    }
+    destroyAdminSession(token);
+    res.json({ success: true });
+  });
+
+  // 修改管理密码：需提供当前密码 + 满足强度的新密码
+  // 成功后作废所有已签发会话（防止旧 token 继续可用），并为调用方重新签发
+  api.post('/admin/password', (req, res) => {
+    const { current_password, new_password } = req.body || {};
+    const adminPassword = configManager.getAdminPassword();
+
+    if (typeof current_password !== 'string' || !safeEqual(current_password, adminPassword)) {
+      log(`[SECURITY] 修改管理密码失败（当前密码错误）IP: ${req.ip}`);
+      return res.status(403).json({ error: '当前密码不正确' });
+    }
+
+    const check = validateAdminPassword(new_password);
+    if (!check.ok) {
+      return res.status(400).json({ error: check.reason });
+    }
+
+    configManager.setAdminPassword(new_password);
+    adminSessions.clear();
+    log('[SECURITY] 管理密码已更新，所有旧会话已失效');
+
+    const session = createAdminSession();
+    res.json({ success: true, token: session.token, expires: session.expiresAt });
+  });
+
+  // 整体配置：密钥字段一律返回掩码，避免一次泄漏全部上游 Key
   api.get('/config', (req, res) => {
-    res.json(configManager.getConfig());
+    res.json(maskConfig(configManager.getConfig()));
   });
 
   // ---- 配置组 ----
@@ -1325,13 +1470,27 @@ function createApp(configManager) {
   });
 
   api.post('/models', (req, res) => {
-    const m = configManager.addModel(req.body);
+    // 新建模型时掩码无原值可还原，统一视为空（避免把掩码存成真密钥）
+    const payload = req.body || {};
+    if (payload.endpoint && payload.endpoint.api_key === SECRET_MASK) {
+      payload.endpoint = { ...payload.endpoint, api_key: '' };
+    }
+    const m = configManager.addModel(payload);
     res.json({ success: true, model: m });
   });
 
   api.put('/models/:id', (req, res) => {
     const id = req.params.id;
-    if (!configManager.updateModel(id, req.body)) {
+    const payload = { ...(req.body || {}) };
+    // 前端未修改密钥时会原样回传掩码 → 保留原有密钥
+    if (payload.endpoint && payload.endpoint.api_key === SECRET_MASK) {
+      const existing = configManager.getModels().find((m) => m.id === id);
+      payload.endpoint = {
+        ...payload.endpoint,
+        api_key: unmaskSecret(payload.endpoint.api_key, existing && existing.endpoint && existing.endpoint.api_key)
+      };
+    }
+    if (!configManager.updateModel(id, payload)) {
       return res.status(404).json({ error: 'Model not found' });
     }
     res.json({ success: true });
@@ -1513,7 +1672,24 @@ function createApp(configManager) {
     const anthropic = api_type === 'anthropic';
     const targetPath = upstreamUrl.pathname.replace(/\/$/, '') + (anthropic ? '/messages' : '/chat/completions');
     const proto = upstreamUrl.protocol === 'https:' ? https : http;
-    const apiKey = (endpoint.api_key || '').trim();
+    let apiKey = (endpoint.api_key || '').trim();
+
+    // 编辑既有模型时，前端从脱敏配置拿到的是掩码（真实密钥不回前端），
+    // 为空可能是"留空不填"——都按已存模型回填原密钥再测，避免把掩码/空串发给上游
+    if (!apiKey || apiKey === SECRET_MASK) {
+      const norm = (u) => (u || '').replace(/\/+$/, '');
+      const sameUrl = configManager.getModels().filter(
+        (m) => m.endpoint && m.endpoint.url && m.endpoint.api_key && norm(m.endpoint.url) === norm(endpoint.url)
+      );
+      if (sameUrl.length > 0) {
+        const hit = sameUrl.find((m) => m.model_id === model_id) || sameUrl[0];
+        apiKey = hit.endpoint.api_key || '';
+      }
+    }
+    // 带了掩码却匹配不到已存模型（如改了端点 URL 但没重填密钥）→ 直接提示，别把掩码发给上游
+    if (apiKey === SECRET_MASK) {
+      return res.status(400).json({ error: '该端点未找到已保存的 API Key：修改端点 URL 后请重新填写密钥再测试' });
+    }
 
     const testBody = {
       model: model_id,
@@ -1629,18 +1805,25 @@ function createApp(configManager) {
     }, 300);
   });
 
-  // 登录接口（不需要鉴权）
+  // ---- 登录 / 登出 ----
+
+  // 登录接口（不需要鉴权，但受 loginLimiter 严格限流）
   const publicApi = express.Router();
   publicApi.use(express.json({ limit: '1mb' }));
-  publicApi.post('/login', (req, res) => {
+  publicApi.post('/login', loginLimiter, (req, res) => {
     const { password } = req.body;
     const adminPassword = configManager.getAdminPassword();
 
-    if (!password || password !== adminPassword) {
+    // 定时安全比较：避免通过响应耗时逐字节推断密码
+    if (typeof password !== 'string' || !safeEqual(password, adminPassword)) {
+      log(`[SECURITY] 登录失败（密码错误）IP: ${req.ip}`);
       return res.status(401).json({ error: 'Invalid password' });
     }
 
-    res.json({ success: true, token: adminPassword });
+    // 签发随机会话 token，而不是把密码本身当 token 返回
+    const session = createAdminSession();
+    log(`[SECURITY] 登录成功 IP: ${req.ip}`);
+    res.json({ success: true, token: session.token, expires: session.expiresAt });
   });
 
   app.use('/api', publicApi);
@@ -1654,7 +1837,7 @@ function createApp(configManager) {
     const settings = configManager.getSettings();
     const auth = req.headers['authorization'] || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-    if (!token || token !== settings.proxy_key) {
+    if (!token || !safeEqual(token, settings.proxy_key)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Invalid proxy key' }));
     }

@@ -11,3 +11,8 @@ package-lock.json
 *.log
 .DS_Store
 Thumbs.db
+
+# 部署打包产物与一次性脚本（不入库）
+llmhydra-update-*.zip
+llm-hydra-v*.zip
+verify_anthropic.mjs
