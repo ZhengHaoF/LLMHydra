@@ -41,7 +41,7 @@ async function main() {
 
   const app = createApp(configManager);
 
-  app.listen(port, HOST, () => {
+  const server = app.listen(port, HOST, () => {
     console.log(`\n已启动: http://localhost:${port}`);
     console.log(`  监听地址  : ${HOST}:${port}`);
     console.log(`  管理面板  : http://localhost:${port}`);
@@ -79,6 +79,14 @@ async function main() {
       console.log('');
     }
   });
+
+  // 调大 Node 默认超时，适配 LLM 代理场景：
+  // - 客户端 Agent 模式/多图请求体较大，给足上传时间
+  // - headersTimeout 默认 60s，大请求体上传慢时会提前剪断连接（表现为客户端报不完整响应）
+  // - 长流式响应期间也要保证连接不被服务端主动掐断
+  server.headersTimeout = 5 * 60 * 1000;   // 等待完整请求头的上限
+  server.requestTimeout = 10 * 60 * 1000;  // 单个请求总时限（含 body 上传 + 长流响应）
+  server.keepAliveTimeout = 65 * 1000;      // 略大于常见反代的 60s，避免 keep-alive 连接被服务端先行关闭
 
   // 优雅退出：关闭统计库（触发 WAL checkpoint，避免最近明细停留在 -wal 文件里）
   const shutdown = () => {

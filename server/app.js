@@ -820,7 +820,9 @@ function relayUpstream(upstreamRes, clientRes, isStream, anthropic, toolNameMap,
     const rh = {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
-      'connection': 'keep-alive'
+      'connection': 'keep-alive',
+      // 通知 Nginx 等反代不要缓冲 SSE，避免长流/慢思考被缓冲后超时剪断（超时会返回不完整响应）
+      'X-Accel-Buffering': 'no'
     };
     clientRes.writeHead(upstreamRes.statusCode, rh);
     if (anthropic) {
@@ -833,6 +835,8 @@ function relayUpstream(upstreamRes, clientRes, isStream, anthropic, toolNameMap,
     return new Promise((resolve) => {
       const rh = { ...upstreamRes.headers };
       delete rh['transfer-encoding'];
+      // 同样禁止反代缓冲大响应，避免长响应在反代层超时被剪断
+      rh['X-Accel-Buffering'] = 'no';
       clientRes.writeHead(upstreamRes.statusCode, rh);
       // 客户端断开时中止上游请求，避免泄漏连接
       const onClientClose = () => {
