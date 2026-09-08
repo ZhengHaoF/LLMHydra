@@ -87,7 +87,7 @@
                 >最大输出 {{ tokenSuggestion.max_output_tokens }}</span>
               </span>
             </template>
-            <span v-else-if="activeGroup.chain.length > 0" class="canvas-hint canvas-hint-warn">· 未配置 token 参考值，可在模型编辑中拉取 OpenRouter 或手动填写</span>
+            <span v-else-if="activeGroup.chain.length > 0" class="canvas-hint canvas-hint-warn">· 未配置 token 参考值，可在模型编辑中拉取 LiteLLM 模型库或手动填写</span>
           </div>
           <div class="canvas-title canvas-title-empty" v-else>
             <span class="canvas-hint">请在左侧选择或新建一个配置组</span>

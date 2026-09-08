@@ -117,7 +117,7 @@ function normalizeModel(m) {
   if (typeof out.max_retries !== 'number' || !Number.isFinite(out.max_retries) || out.max_retries < 0) out.max_retries = 1;
   if (out.api_type === undefined) out.api_type = 'openai';
   if (!['openai', 'anthropic'].includes(out.api_type)) out.api_type = 'openai';
-  // OpenRouter 参考值（展示用，可空）
+  // LiteLLM 参考值（展示用，可空）
   if (out.context_length !== undefined && out.context_length !== null) {
     const v = parseInt(out.context_length);
     out.context_length = Number.isFinite(v) && v >= 0 ? v : null;
@@ -156,9 +156,9 @@ function normalizeSettings(s) {
       ? s.circuit_breaker_duration_min : DEFAULT_SETTINGS.circuit_breaker_duration_min,
     proxy_key: (s && typeof s.proxy_key === 'string') ? s.proxy_key : '',
     admin_password: (s && typeof s.admin_password === 'string' && s.admin_password.length > 0) ? s.admin_password : '',
-    // OpenRouter 模型库缓存（首次启动为 null，刷新后填充）
-    openrouter_models: (s && typeof s.openrouter_models === 'object' && s.openrouter_models !== null)
-      ? s.openrouter_models
+    // LiteLLM 模型库缓存（首次启动为 null，刷新后填充）
+    litellm_models: (s && typeof s.litellm_models === 'object' && s.litellm_models !== null)
+      ? s.litellm_models
       : null
   };
 }
@@ -327,7 +327,7 @@ class ConfigManager {
       }
       existing.api_type = model.api_type;
     }
-    // OpenRouter 参考值：null 表示清空，undefined 表示不动
+    // LiteLLM 参考值：null 表示清空，undefined 表示不动
     if (model.context_length !== undefined) {
       if (model.context_length === null) {
         existing.context_length = null;
@@ -401,21 +401,21 @@ class ConfigManager {
       const v = parseInt(patch.circuit_breaker_duration_min);
       if (v >= 1 && v <= 1440) s.circuit_breaker_duration_min = v;
     }
-    // 注意：openrouter_models 不通过 updateSettings 修改，避免被 PUT /api/settings 清空
+    // 注意：litellm_models 不通过 updateSettings 修改，避免被 PUT /api/settings 清空
     this.save();
     return s;
   }
 
-  // ---- OpenRouter 模型库 ----
+  // ---- LiteLLM 模型库 ----
 
-  getOpenRouterModels() {
+  getLitellmModels() {
     this._ensureConfig();
-    return this._config.settings.openrouter_models || null;
+    return this._config.settings.litellm_models || null;
   }
 
-  setOpenRouterModels(payload) {
+  setLitellmModels(payload) {
     this._ensureConfig();
-    this._config.settings.openrouter_models = payload;
+    this._config.settings.litellm_models = payload;
     this.save();
   }
 

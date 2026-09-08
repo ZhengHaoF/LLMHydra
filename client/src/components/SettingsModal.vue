@@ -44,9 +44,9 @@
           </div>
 
           <div class="section">
-            <h3>OpenRouter 模型库</h3>
+            <h3>LiteLLM 模型库</h3>
             <p class="section-desc">
-              拉取 OpenRouter 公开的模型列表，编辑模型时可根据 model_id 自动匹配上下文窗口和最大输入/输出 token（参考值，可手动修改）。
+              拉取 LiteLLM 公开的模型参数表（GitHub 数据源），编辑模型时可根据 model_id 自动匹配上下文窗口和最大输入/输出 token（参考值，可手动修改）。
             </p>
 
             <div class="or-status">
@@ -58,7 +58,7 @@
             </div>
 
             <div class="or-actions">
-              <button class="btn-primary" @click="refreshOpenRouter" :disabled="refreshing">
+              <button class="btn-primary" @click="refreshLiteLLM" :disabled="refreshing">
                 {{ refreshing ? '拉取中...' : '拉取模型列表' }}
               </button>
               <span v-if="orError" class="or-error">{{ orError }}</span>
@@ -132,8 +132,8 @@ const emit = defineEmits(['close', 'saved', 'logout'])
 const form = ref({ ...DEFAULTS })
 const saving = ref(false)
 
-// OpenRouter 模型库状态
-const orCached = ref({ fetched_at: null, count: 0, models: [] })
+// LiteLLM 模型库状态
+const orCached = ref({ fetched_at: null, count: 0, models: {} })
 const refreshing = ref(false)
 const orError = ref('')
 const orSuccess = ref('')
@@ -197,16 +197,16 @@ async function loadSettings() {
   }
 }
 
-async function loadOpenRouterStatus() {
+async function loadLiteLLMStatus() {
   try {
-    const data = await api.getOpenRouterModels()
+    const data = await api.getLiteLLMModels()
     orCached.value = {
       fetched_at: data?.fetched_at || null,
       count: data?.count || 0,
-      models: data?.models || []
+      models: data?.models || {}
     }
   } catch (e) {
-    console.error('加载 OpenRouter 模型库状态失败:', e)
+    console.error('加载 LiteLLM 模型库状态失败:', e)
   }
 }
 
@@ -221,14 +221,14 @@ function formatTime(iso) {
   }
 }
 
-async function refreshOpenRouter() {
+async function refreshLiteLLM() {
   refreshing.value = true
   orError.value = ''
   orSuccess.value = ''
   try {
-    const data = await api.refreshOpenRouterModels()
+    const data = await api.refreshLiteLLMModels()
     orSuccess.value = `成功拉取 ${data.count} 个模型`
-    await loadOpenRouterStatus()
+    await loadLiteLLMStatus()
   } catch (e) {
     orError.value = e.message || '拉取失败'
   } finally {
@@ -239,7 +239,7 @@ async function refreshOpenRouter() {
 watch(() => props.visible, (val) => {
   if (val) {
     loadSettings()
-    loadOpenRouterStatus()
+    loadLiteLLMStatus()
     resetPwdForm()
   }
 })

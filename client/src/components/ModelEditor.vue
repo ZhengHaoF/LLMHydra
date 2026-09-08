@@ -18,20 +18,20 @@
           class="btn-match"
           @click="handleMatch(true)"
           :disabled="matching"
-          :title="orLoaded ? '根据本地 OpenRouter 模型库匹配' : '本地未缓存，请先在设置中拉取模型列表'"
+          :title="orLoaded ? '根据本地 LiteLLM 模型库匹配' : '本地未缓存，请先在设置中拉取模型列表'"
         >
           {{ matching ? '匹配中...' : '尝试匹配' }}
         </button>
       </div>
       <div class="field-hint">
-        转发给上游 API 的实际模型名称。输入后会自动尝试从本地 OpenRouter 模型库匹配（仅在字段为空时填入）。
+        转发给上游 API 的实际模型名称。输入后会自动尝试从本地 LiteLLM 模型库匹配（仅在字段为空时填入）。
         <span v-if="matchHint" class="match-hint" :class="matchHintType">{{ matchHint }}</span>
       </div>
     </div>
 
     <div class="form-group or-ref-group">
       <label class="or-ref-label">
-        OpenRouter 参考值
+        LiteLLM 参考值
         <span class="or-ref-tip">（仅展示参考，可手动修改）</span>
       </label>
       <div class="or-ref-row">
@@ -172,16 +172,16 @@ let _orCachePromise = null
 async function getOrCache() {
   if (_orCache) return _orCache
   if (_orCachePromise) return _orCachePromise
-  _orCachePromise = api.getOpenRouterModels()
+  _orCachePromise = api.getLiteLLMModels()
     .then((data) => {
-      _orCache = data || { fetched_at: null, count: 0, models: [] }
+      _orCache = data || { fetched_at: null, count: 0, models: {} }
       return _orCache
     })
     .catch((e) => {
-      console.error('[ModelEditor] 加载 OpenRouter 模型库失败:', e?.message || e)
+      console.error('[ModelEditor] 加载 LiteLLM 模型库失败:', e?.message || e)
       // 不写 _orCache：保持 null，下次 handleMatch 会重新请求
       // 给本次调用返回一个空对象，让外层判断逻辑走「请先在设置中拉取」分支
-      return { fetched_at: null, count: 0, models: [] }
+      return { fetched_at: null, count: 0, models: {} }
     })
     .finally(() => { _orCachePromise = null })
   return _orCachePromise
@@ -215,7 +215,7 @@ const form = reactive({
   endpoint_timeout: 30,
   max_retries: 1,
   api_type: 'openai',
-  // OpenRouter 参考值
+  // LiteLLM 参考值
   context_length: null,
   max_input_tokens: null,
   max_output_tokens: null
@@ -271,38 +271,42 @@ watch(() => form.model_id, (val) => {
 })
 
 // 本地缓存匹配（不需要走服务端）
+// LiteLLM 的数据源是 JSON 对象：key 为模型名（可能带 provider 前缀，如 openai/gpt-4o）
 function localMatch(modelId) {
-  if (!_orCache || !Array.isArray(_orCache.models) || _orCache.models.length === 0) return null
+  if (!_orCache || !_orCache.models || typeof _orCache.models !== 'object') return null
   const target = modelId.trim().toLowerCase()
-  const list = _orCache.models
-  // 精确
-  let hit = list.find((m) => m.id.toLowerCase() === target)
-  if (hit) return toMatchResult(hit)
-  // 模糊：忽略厂商前缀
-  const suffixes = list
-    .map((m) => ({ m, idLower: m.id.toLowerCase() }))
-    .filter((x) => x.idLower.endsWith('/' + target) || x.idLower === target)
-  if (suffixes.length > 0) {
-    suffixes.sort((a, b) => a.m.id.length - b.m.id.length)
-    return toMatchResult(suffixes[0].m)
+  const map = _orCache.models
+  const keys = Object.keys(map)
+  // 精确：先大小写敏感直取，再忽略大小写
+  let hitKey = map[target] !== undefined ? target : null
+  if (hitKey === null) {
+    hitKey = keys.find((k) => k.toLowerCase() === target) || null
   }
-  return null
+  // 模糊：忽略厂商前缀（如 "gpt-4o" 命中 "azure/us/gpt-4o"），多条时取最短 key
+  if (hitKey === null) {
+    const suffixes = keys.filter((k) => k.toLowerCase().endsWith('/' + target))
+    if (suffixes.length > 0) {
+      suffixes.sort((a, b) => a.length - b.length)
+      hitKey = suffixes[0]
+    }
+  }
+  if (hitKey === null) return null
+  return toMatchResult(hitKey, map[hitKey])
 }
 
-function toMatchResult(m) {
-  const context = m.context_length
-  const output = m.max_output_tokens
-  let input = null
-  if (typeof context === 'number' && typeof output === 'number') {
-    const v = context - output
-    input = v > 0 ? v : null
-  }
+// LiteLLM 条目字段映射（实测语义）：
+//   max_input_tokens   -> 上下文窗口总长 / 最大输入（LiteLLM 中该字段即模型的最大输入窗口）
+//   max_output_tokens  -> 最大输出（缺失时退回 max_tokens）
+function toMatchResult(id, m) {
+  const context = (m && typeof m.max_input_tokens === 'number') ? m.max_input_tokens : null
+  const output = (m && typeof m.max_output_tokens === 'number') ? m.max_output_tokens
+    : ((m && typeof m.max_tokens === 'number') ? m.max_tokens : null)
   return {
-    id: m.id,
-    name: m.name,
+    id,
+    name: id, // LiteLLM 没有 display name，用模型名（key）展示
     context_length: context,
     max_output_tokens: output,
-    max_input_tokens: input
+    max_input_tokens: context
   }
 }
 
@@ -513,7 +517,7 @@ function formatResponse(val) {
   cursor: not-allowed;
 }
 
-/* OpenRouter 参考值分组 */
+/* LiteLLM 参考值分组 */
 .or-ref-group {
   background: #fafbfc;
   border: 1px solid #ebeef5;
