@@ -60,6 +60,7 @@
             @add="openAddModel"
             @edit="openEditModel"
             @delete="deleteModel"
+            @reorder="onLibraryReorder"
           />
         </div>
         <div class="canvas-bar">
@@ -454,6 +455,22 @@ async function deleteModel(id) {
 function onLibraryDragStart(e) {
   if (canvasRef.value && canvasRef.value.setLibraryDrag) {
     canvasRef.value.setLibraryDrag(e.detail.modelId)
+  }
+}
+
+// 模型库内拖拽排序：乐观更新本地顺序，保存失败时回滚
+async function onLibraryReorder(orderedIds) {
+  const map = new Map(models.value.map((m) => [m.id, m]))
+  const next = orderedIds.map((id) => map.get(id)).filter(Boolean)
+  if (next.length !== models.value.length) return // 序列不完整，忽略
+  const prev = models.value
+  models.value = next
+  try {
+    await api.reorderModels(orderedIds)
+  } catch (e) {
+    console.error('模型排序保存失败:', e)
+    models.value = prev
+    await loadData()
   }
 }
 

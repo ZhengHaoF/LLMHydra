@@ -1479,6 +1479,19 @@ function createApp(configManager) {
     res.json({ success: true, model: m });
   });
 
+  // 注意：必须注册在 PUT /models/:id 之前，否则 "reorder" 会被匹配成 :id
+  api.put('/models/reorder', (req, res) => {
+    const order = req.body && req.body.order;
+    if (!Array.isArray(order)) {
+      return res.status(400).json({ error: 'order must be an array of model ids' });
+    }
+    const finalOrder = configManager.reorderModels(order);
+    if (!finalOrder) {
+      return res.status(400).json({ error: 'invalid order' });
+    }
+    res.json({ success: true, order: finalOrder });
+  });
+
   api.put('/models/:id', (req, res) => {
     const id = req.params.id;
     const payload = { ...(req.body || {}) };

@@ -2,7 +2,7 @@
   <div class="model-library">
     <div class="lib-header">
       <h3>模型库</h3>
-      <span class="lib-hint">拖到下方画布构建链路</span>
+      <span class="lib-hint">拖到下方画布构建链路 · 库内拖动卡片可排序</span>
       <div class="lib-spacer"></div>
       <input
         v-model="filter"
@@ -14,18 +14,29 @@
       <button class="btn-add" @click="$emit('add')">+ 新增模型</button>
     </div>
 
-    <div class="lib-body">
+    <div
+      ref="bodyRef"
+      class="lib-body"
+      @dragover="onBodyDragOver"
+      @dragleave="onBodyDragLeave"
+      @drop="onBodyDrop"
+    >
       <div v-if="models.length === 0" class="empty">暂无模型，点击右上角新增</div>
       <div v-else-if="filteredModels.length === 0" class="empty">没有匹配「{{ filter.trim() }}」的模型</div>
       <div
-        v-for="m in filteredModels"
+        v-for="(m, idx) in filteredModels"
         :key="m.id"
         class="lib-item"
-        :class="{ inChain: isInChain(m.id) }"
+        :class="{
+          inChain: isInChain(m.id),
+          dragging: reorderDragId === m.id,
+          dropHintLeft: canReorder && dropIndex === idx,
+          dropHintRight: canReorder && dropIndex === filteredModels.length && idx === filteredModels.length - 1
+        }"
         draggable="true"
         @dragstart="onDragStart($event, m.id)"
         @click="$emit('edit', m.id)"
-        :title="isInChain(m.id) ? '已在当前配置组的链中 · 点击编辑' : '点击编辑 · 拖到画布加入链路'"
+        :title="isInChain(m.id) ? '已在当前配置组的链中 · 点击编辑' : '点击编辑 · 拖到画布加入链路 · 库内拖动排序'"
       >
         <div class="lib-item-name">{{ m.display_name || m.name || '未命名' }}</div>
         <div class="lib-item-meta">
@@ -56,7 +67,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { IconX } from '@tabler/icons-vue'
 
 const props = defineProps({
@@ -65,9 +76,14 @@ const props = defineProps({
   statsMap: { type: Object, default: () => ({}) }    // model_id -> { total_requests, total_tokens }
 })
 
-const emit = defineEmits(['add', 'edit', 'delete'])
+const emit = defineEmits(['add', 'edit', 'delete', 'reorder'])
 
 const pendingDelete = ref(null)
+
+// ---- 库内拖拽排序状态 ----
+const bodyRef = ref(null)
+const reorderDragId = ref(null) // 正在被拖动排序的模型 id（仅库内排序用，画布拖拽走全局事件）
+const dropIndex = ref(null)     // 插入位置（filteredModels 坐标，0..length）
 
 // 搜索过滤：按显示名 / 模型 ID / 端点域名匹配
 const filter = ref('')
@@ -80,15 +96,85 @@ const filteredModels = computed(() => {
   })
 })
 
+// 搜索过滤时 filteredModels 与 models 索引不一致，禁用排序避免错位
+const canReorder = computed(() => !!reorderDragId.value && !filter.value.trim())
+
 function onDragStart(e, modelId) {
   // 在 dataTransfer 里设一个标记，NodeCanvas 会读 dragstart 事件上的组件 ref
   // 简单做法：把 modelId 放进 dataTransfer，再在 NodeCanvas 端的 dragover 触发时由 App.vue 协调
-  e.dataTransfer.effectAllowed = 'copy'
+  // copyMove：drop 在画布上是 copy（入链），drop 在库内是 move（排序）
+  e.dataTransfer.effectAllowed = 'copyMove'
   e.dataTransfer.setData('application/x-model-id', modelId)
   // 触发一个全局事件，App.vue 监听后写入 NodeCanvas 的 dragSource
   const evt = new CustomEvent('library-drag-start', { detail: { modelId } })
   window.dispatchEvent(evt)
+  // 库内排序：本地记一份拖动状态（未过滤时才允许排序）
+  if (!filter.value.trim()) {
+    reorderDragId.value = modelId
+  }
 }
+
+// ---- 库内排序：dragover / drop ----
+
+function resetReorder() {
+  reorderDragId.value = null
+  dropIndex.value = null
+}
+
+function onBodyDragOver(e) {
+  if (!canReorder.value) {
+    e.dataTransfer.dropEffect = 'none'
+    return
+  }
+  e.preventDefault() // 允许 drop
+  e.dataTransfer.dropEffect = 'move'
+  const items = bodyRef.value ? bodyRef.value.querySelectorAll('.lib-item') : []
+  // 按鼠标 X 与每张卡片中线比较，得到插入位置
+  let idx = items.length
+  for (let i = 0; i < items.length; i++) {
+    const r = items[i].getBoundingClientRect()
+    if (e.clientX < r.left + r.width / 2) { idx = i; break }
+  }
+  dropIndex.value = idx
+  // 接近左右边缘时自动横向滚动
+  if (bodyRef.value) {
+    const rect = bodyRef.value.getBoundingClientRect()
+    const edge = 40
+    if (e.clientX < rect.left + edge) bodyRef.value.scrollLeft -= 12
+    else if (e.clientX > rect.right - edge) bodyRef.value.scrollLeft += 12
+  }
+}
+
+function onBodyDragLeave(e) {
+  // 只在真正离开容器（而不是在子卡片间移动）时清除指示线
+  if (!bodyRef.value || !bodyRef.value.contains(e.relatedTarget)) {
+    dropIndex.value = null
+  }
+}
+
+function onBodyDrop(e) {
+  e.preventDefault()
+  const dragId = reorderDragId.value
+  if (!canReorder.value || dropIndex.value === null) { resetReorder(); return }
+  const ids = filteredModels.value.map((m) => m.id)
+  const srcIdx = ids.indexOf(dragId)
+  const target = dropIndex.value
+  resetReorder()
+  if (srcIdx < 0) return
+  // 落在自己当前位置（左沿/右沿），顺序无变化
+  if (target === srcIdx || target === srcIdx + 1) return
+  ids.splice(srcIdx, 1)
+  ids.splice(target > srcIdx ? target - 1 : target, 0, dragId)
+  emit('reorder', ids)
+}
+
+function onGlobalDragEnd() {
+  // drop 在画布等库外区域时，dragend 兜底清理排序状态
+  resetReorder()
+}
+
+onMounted(() => window.addEventListener('dragend', onGlobalDragEnd))
+onUnmounted(() => window.removeEventListener('dragend', onGlobalDragEnd))
 
 function isInChain(id) {
   return props.currentChain.includes(id)
@@ -210,6 +296,10 @@ function confirmDelete() {
   border-color: #67c23a;
   background: #f0f9eb;
 }
+/* 库内排序视觉反馈：box-shadow 画线，不改变布局宽度 */
+.lib-item.dragging { opacity: 0.45; }
+.lib-item.dropHintLeft { box-shadow: -3px 0 0 0 #409eff; }
+.lib-item.dropHintRight { box-shadow: 3px 0 0 0 #409eff; }
 .lib-item-name {
   font-size: 13px;
   font-weight: 500;

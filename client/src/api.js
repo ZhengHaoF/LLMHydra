@@ -77,6 +77,7 @@ export default {
   addModel: (model) => request('/models', { method: 'POST', body: JSON.stringify(model) }),
   updateModel: (id, model) => request(`/models/${encodeId(id)}`, { method: 'PUT', body: JSON.stringify(model) }),
   deleteModel: (id) => request(`/models/${encodeId(id)}`, { method: 'DELETE' }),
+  reorderModels: (order) => request('/models/reorder', { method: 'PUT', body: JSON.stringify({ order }) }),
 
   // 配置
   setPort: (port) => request('/config/port', { method: 'PUT', body: JSON.stringify({ port }) }),

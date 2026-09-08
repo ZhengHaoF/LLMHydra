@@ -375,6 +375,30 @@ class ConfigManager {
     return true;
   }
 
+  // 重排模型库显示顺序：orderedIds 为目标顺序的模型 id 数组。
+  // 容错策略：忽略未知 id、去重；遗漏的 id 按原相对顺序追加到末尾，保证不丢模型。
+  reorderModels(orderedIds) {
+    this._ensureConfig();
+    if (!Array.isArray(orderedIds)) return null;
+    const current = this._config.models;
+    const currentIds = current.map((m) => m.id);
+    const seen = new Set();
+    const validOrder = [];
+    for (const id of orderedIds) {
+      if (typeof id === 'string' && currentIds.includes(id) && !seen.has(id)) {
+        seen.add(id);
+        validOrder.push(id);
+      }
+    }
+    for (const id of currentIds) {
+      if (!seen.has(id)) validOrder.push(id);
+    }
+    const map = new Map(current.map((m) => [m.id, m]));
+    this._config.models = validOrder.map((id) => map.get(id));
+    this.save();
+    return validOrder;
+  }
+
   // ---- 端口 ----
 
   setPort(port) {
