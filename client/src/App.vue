@@ -112,6 +112,17 @@
           </div>
         </div>
       </div>
+      <!-- 首次配置加载遮罩：数据到达前盖住主区域，避免链路图空态闪烁 -->
+      <div v-if="!initialLoaded" class="main-loading">
+        <template v-if="initialError">
+          <p class="main-loading-error">{{ initialError }}</p>
+          <button class="main-loading-retry" @click="loadData">重试</button>
+        </template>
+        <template v-else>
+          <div class="main-loading-spinner" aria-hidden="true"></div>
+          <p class="main-loading-text">链路配置加载中…</p>
+        </template>
+      </div>
     </main>
 
     <!-- 模型编辑模态框 -->
@@ -178,6 +189,9 @@ const showSettings = ref(false)
 const canvasRef = ref(null)
 const modelStats = ref([])
 const logCollapsed = ref(false)
+// 首次配置加载状态：initialLoaded 为 false 时主区域显示加载遮罩（后台静默刷新不触发）
+const initialLoaded = ref(false)
+const initialError = ref('')
 
 const editingModel = computed(() => {
   if (editingId.value === null) return null
@@ -259,6 +273,8 @@ async function loadData() {
       chain: Array.isArray(g.chain) ? g.chain : []
     }))
     port.value = data.port || 8093
+    initialLoaded.value = true
+    initialError.value = ''
     // 第一次加载时默认选第一个 group
     if (!activeGroupId.value && groups.value.length > 0) {
       activeGroupId.value = groups.value[0].id
@@ -269,6 +285,10 @@ async function loadData() {
     }
   } catch (e) {
     console.error('加载失败:', e)
+    // 仅首次加载失败时占据主区域并提供重试；已加载过后的后台刷新失败保留旧数据
+    if (!initialLoaded.value) {
+      initialError.value = '配置加载失败，请确认服务正常后重试'
+    }
   }
 }
 
@@ -342,6 +362,12 @@ async function doLogout() {
   }
   api.clearToken()
   authenticated.value = false
+  // 重置首次加载状态与残留数据，重新登录时重新走加载遮罩
+  initialLoaded.value = false
+  initialError.value = ''
+  groups.value = []
+  models.value = []
+  activeGroupId.value = null
   if (statsTimer) {
     clearInterval(statsTimer)
     statsTimer = null
@@ -694,6 +720,7 @@ function onSettingsLogout() {
 .btn-settings:hover { background: rgba(255,255,255,0.2); }
 
 .main {
+  position: relative;
   flex: 1;
   display: flex;
   overflow: hidden;
@@ -832,5 +859,65 @@ function onSettingsLogout() {
 .api-modal-body {
   flex: 1;
   overflow-y: auto;
+}
+/* ---- 首次配置加载遮罩 ---- */
+.main-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background: #f5f7fa;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+.main-loading-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid #dcdfe6;
+  border-top-color: #409eff;
+  border-radius: 50%;
+  /* 旋转持续进行；淡入延迟 200ms，请求快于 200ms 返回时用户看不到 spinner 闪烁 */
+  animation: loading-spin 0.8s linear infinite, loading-fade 0.2s ease 0.2s forwards;
+  opacity: 0;
+}
+.main-loading-text {
+  font-size: 13px;
+  color: #909399;
+  margin: 0;
+  animation: loading-fade 0.2s ease 0.2s forwards;
+  opacity: 0;
+}
+.main-loading-error {
+  font-size: 14px;
+  color: #f56c6c;
+  margin: 0;
+}
+.main-loading-retry {
+  padding: 8px 24px;
+  background: #409eff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.main-loading-retry:hover {
+  opacity: 0.85;
+}
+@keyframes loading-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes loading-fade {
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .main-loading-spinner,
+  .main-loading-text {
+    animation: none;
+    opacity: 1;
+  }
 }
 </style>
