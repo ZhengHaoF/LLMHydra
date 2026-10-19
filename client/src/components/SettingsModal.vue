@@ -8,6 +8,11 @@
         </div>
 
         <div class="modal-body">
+          <div v-if="loading" class="settings-loading">设置加载中，请稍候…</div>
+          <div v-else-if="loadError" class="settings-error">
+            <span>{{ loadError }}</span>
+            <button class="settings-error-retry" @click="loadSettings">重试</button>
+          </div>
           <div class="section">
             <h3>熔断器配置</h3>
             <p class="section-desc">当某个端点连续失败达到阈值后，自动跳过该端点一段时间。</p>
@@ -107,7 +112,9 @@
           <button class="btn-cancel" @click="resetDefaults">恢复默认</button>
           <div class="spacer"></div>
           <button class="btn-cancel" @click="close">取消</button>
-          <button class="btn-primary" @click="save" :disabled="saving">保存</button>
+          <button class="btn-primary" @click="save" :disabled="saving || loading">
+            {{ saving ? '保存中…' : '保存' }}
+          </button>
         </div>
       </div>
     </div>
@@ -117,6 +124,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 import api from '../api.js'
+import { notify, errMsg } from '../ui.js'
 
 const DEFAULTS = {
   circuit_breaker_threshold: 3,
@@ -131,6 +139,9 @@ const emit = defineEmits(['close', 'saved', 'logout'])
 
 const form = ref({ ...DEFAULTS })
 const saving = ref(false)
+// 加载态：加载未完成时禁止保存，否则默认值（3/5）会覆盖服务端真实配置
+const loading = ref(false)
+const loadError = ref('')
 
 // LiteLLM 模型库状态
 const orCached = ref({ fetched_at: null, count: 0, models: {} })
@@ -186,6 +197,8 @@ async function changePassword() {
 }
 
 async function loadSettings() {
+  loading.value = true
+  loadError.value = ''
   try {
     const s = await api.getSettings()
     form.value = {
@@ -193,7 +206,10 @@ async function loadSettings() {
       circuit_breaker_duration_min: s.circuit_breaker_duration_min ?? DEFAULTS.circuit_breaker_duration_min
     }
   } catch (e) {
-    console.error('加载设置失败:', e)
+    loadError.value = errMsg(e, '设置加载失败')
+    notify(loadError.value)
+  } finally {
+    loading.value = false
   }
 }
 
@@ -259,13 +275,18 @@ function resetDefaults() {
 }
 
 async function save() {
+  if (loading.value) {
+    notify('设置尚未加载完成，请稍候再保存', 'warn')
+    return
+  }
+  if (saving.value) return
   saving.value = true
   try {
     await api.updateSettings(form.value)
     emit('saved')
     close()
   } catch (e) {
-    console.error('保存设置失败:', e)
+    notify(errMsg(e, '保存设置失败'))
   } finally {
     saving.value = false
   }
@@ -435,6 +456,51 @@ async function save() {
 .btn-primary:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.btn-danger:disabled,
+.btn-cancel:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-loading {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: #f4f8ff;
+  border: 1px solid #d4e4ff;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #409eff;
+}
+
+.settings-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: #fef0f0;
+  border: 1px solid #fbc4c4;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #f56c6c;
+}
+
+.settings-error-retry {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 4px 14px;
+  background: #f56c6c;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-error-retry:hover {
+  background: #e04545;
 }
 
 .btn-cancel {

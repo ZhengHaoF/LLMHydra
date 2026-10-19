@@ -14,6 +14,18 @@ function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// 解析响应体：服务端成功返回 JSON，异常时可能返回 HTML（代理错误页 / 连接被掐断），
+// 这种情况不能直接把 res.json() 的解析异常抛给调用方，否则上层拿不到任何有用信息。
+async function parseBody(res) {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { _raw: text };
+  }
+}
+
 async function request(url, options = {}) {
   const token = getToken();
   const headers = {
@@ -24,18 +36,34 @@ async function request(url, options = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${BASE}${url}`, {
-    ...options,
-    headers
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      ...options,
+      headers
+    });
+  } catch (e) {
+    // 服务重启 / 断网时 fetch 直接 reject，转成可读文案
+    throw new Error('无法连接服务，请检查服务是否在运行');
+  }
 
   if (res.status === 401) {
     clearToken();
     window.dispatchEvent(new CustomEvent('auth-expired'));
-    throw new Error('Authentication required');
+    throw new Error('会话已过期，请重新登录');
   }
 
-  return res.json();
+  const data = await parseBody(res);
+
+  // 非 2xx 一律抛错，让调用方的 catch 能拿到服务端的真实原因
+  if (!res.ok) {
+    const msg = (data && (data.error || data.message)) || `请求失败（HTTP ${res.status}）`;
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+
+  return data;
 }
 
 function encodeId(id) {

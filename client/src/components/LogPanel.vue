@@ -43,9 +43,10 @@
 
     <div v-if="!collapsed" class="log-body">
       <div ref="logListRef" class="log-list">
-        <div v-if="currentLogs.length === 0" class="log-empty">
-          {{ activeLogGroup === SYSTEM_KEY ? '暂无系统日志' : '该配置组暂无日志' }}
-        </div>
+      <div v-if="loadingLogs" class="log-empty">加载中…</div>
+      <div v-else-if="currentLogs.length === 0" class="log-empty">
+        {{ activeLogGroup === SYSTEM_KEY ? '暂无系统日志' : '该配置组暂无日志' }}
+      </div>
         <div v-for="(log, idx) in currentLogs" :key="log.ts + '-' + idx" class="log-item" :class="'log-' + log.level">
           <span class="log-time">{{ log.time }}</span>
           <span class="log-msg">{{ log.message }}</span>
@@ -63,8 +64,10 @@
             <span style="color:#e6a23c;font-size:12px">仅清空当前面板，其他配置组不受影响。此操作不可恢复。</span>
           </div>
           <div class="confirm-actions">
-            <button class="btn-cancel" @click="showConfirm = false">取消</button>
-            <button class="btn-danger" @click="doClear">确认清空</button>
+            <button class="btn-cancel" @click="showConfirm = false" :disabled="clearing">取消</button>
+            <button class="btn-danger" @click="doClear" :disabled="clearing">
+              {{ clearing ? '清空中…' : '确认清空' }}
+            </button>
           </div>
         </div>
       </div>
@@ -75,6 +78,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import api from '../api.js'
+import { notify, errMsg } from '../ui.js'
 import { IconClipboardText, IconTrash, IconChevronRight, IconChevronLeft } from '@tabler/icons-vue'
 
 const SYSTEM_KEY = '__system__'
@@ -93,6 +97,8 @@ const unreadMap = ref({})
 const activeLogGroup = ref(SYSTEM_KEY)
 const logListRef = ref(null)
 const showConfirm = ref(false)
+const loadingLogs = ref(true)
+const clearing = ref(false)
 const MAX_LOGS = 500
 let eventSource = null
 let userScrolled = false
@@ -110,6 +116,7 @@ const currentTabName = computed(() => {
 // 初始化：并行拉取系统 + 所有配置组的历史日志
 async function loadAllLogs() {
   const groupIds = [SYSTEM_KEY, ...props.groups.map((g) => g.id)]
+  loadingLogs.value = true
   try {
     const results = await Promise.all(groupIds.map((gid) => api.getLogs(gid)))
     const map = {}
@@ -121,6 +128,8 @@ async function loadAllLogs() {
     scrollToBottom()
   } catch (e) {
     console.error('加载日志失败:', e)
+  } finally {
+    loadingLogs.value = false
   }
 }
 
@@ -188,6 +197,8 @@ function confirmClear() {
 
 // 执行清空（只清当前激活面板）
 async function doClear() {
+  if (clearing.value) return
+  clearing.value = true
   try {
     await api.clearLogs(activeLogGroup.value === SYSTEM_KEY ? undefined : activeLogGroup.value)
     const map = { ...logsMap.value }
@@ -196,7 +207,9 @@ async function doClear() {
     showConfirm.value = false
     emit('clear')
   } catch (e) {
-    console.error('清空日志失败:', e)
+    notify(errMsg(e, '清空日志失败'))
+  } finally {
+    clearing.value = false
   }
 }
 

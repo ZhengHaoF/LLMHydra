@@ -1,15 +1,16 @@
 <template>
   <Teleport to="body">
-    <div v-if="model || isNew" class="modal-overlay" @click.self="$emit('cancel')">
+    <div v-if="model || isNew" class="modal-overlay" @click.self="onOverlayClick">
       <div class="modal-box">
         <div class="modal-header">
           <h2>{{ isNew ? '新增模型' : '编辑模型' }}</h2>
-          <button class="modal-close" @click="$emit('cancel')"><IconX :size="16" /></button>
+          <button class="modal-close" @click="$emit('cancel')" :disabled="saving"><IconX :size="16" /></button>
         </div>
         <div class="modal-body">
           <ModelEditor
             :model="model"
             :is-new="isNew"
+            :saving="saving"
             @save="handleSave"
             @cancel="$emit('cancel')"
           />
@@ -23,12 +24,19 @@
 import ModelEditor from './ModelEditor.vue'
 import { IconX } from '@tabler/icons-vue'
 
-defineProps({
+const props = defineProps({
   model: { type: Object, default: null },
-  isNew: { type: Boolean, default: false }
+  isNew: { type: Boolean, default: false },
+  saving: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['save', 'cancel'])
+
+// 保存中时不允许点遮罩关闭，避免请求还在飞就把表单内容丢掉
+function onOverlayClick() {
+  if (props.saving) return
+  emit('cancel')
+}
 
 function handleSave(data) {
   emit('save', data)
@@ -75,6 +83,10 @@ function handleSave(data) {
   border-radius: 4px;
 }
 .modal-close:hover { color: #303133; background: #f0f0f0; }
+.modal-close:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .modal-body {
   overflow-y: auto;
   max-height: calc(90vh - 60px);

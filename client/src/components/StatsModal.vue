@@ -8,6 +8,12 @@
         </div>
 
         <div class="modal-body">
+          <!-- 首次加载遮罩：避免默认的 0 / "暂无数据" 被误认为真实数据 -->
+          <div v-if="loading" class="stats-loading" aria-hidden="true"><span></span></div>
+          <div v-if="loadError" class="stats-error">
+            <span>{{ loadError }}</span>
+            <button class="stats-error-retry" @click="loadStats">重试</button>
+          </div>
           <!-- 总览 -->
           <div class="overview-section">
             <h3>总览</h3>
@@ -197,7 +203,9 @@
         </div>
 
         <div class="modal-footer">
-          <button class="btn-danger" @click="confirmClear">清空统计</button>
+          <button class="btn-danger" @click="confirmClear" :disabled="clearing">
+            {{ clearing ? '清空中…' : '清空统计' }}
+          </button>
           <button class="btn-primary" @click="close">关闭</button>
         </div>
       </div>
@@ -213,8 +221,10 @@
             <span style="color:#e6a23c;font-size:12px">此操作不可恢复。</span>
           </div>
           <div class="confirm-actions">
-            <button class="btn-cancel" @click="showConfirm = false">取消</button>
-            <button class="btn-danger" @click="doClear">确认清空</button>
+            <button class="btn-cancel" @click="showConfirm = false" :disabled="clearing">取消</button>
+            <button class="btn-danger" @click="doClear" :disabled="clearing">
+              {{ clearing ? '清空中…' : '确认清空' }}
+            </button>
           </div>
         </div>
       </div>
@@ -225,6 +235,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted } from 'vue'
 import api from '../api.js'
+import { notify, errMsg } from '../ui.js'
 import { Bar, Line } from 'vue-chartjs'
 import { Chart as ChartJS, Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, LineElement, PointElement } from 'chart.js'
 
@@ -250,6 +261,9 @@ const chartMode = ref('hourly')
 const hourlyStats = ref([])
 const dailyStats = ref([])
 const selectedModels = ref([])
+const loading = ref(false)
+const loadError = ref('')
+const clearing = ref(false)
 let eventSource = null
 
 const COLOR_PALETTE = [
@@ -472,7 +486,13 @@ const tokenVolumeOptions = {
   }
 }
 
-async function loadStats() {
+async function loadStats(opts = {}) {
+  // silent=true 用于 SSE 推送的自动刷新，失败时不弹提示、不闪加载态
+  const silent = opts.silent === true
+  if (!silent) {
+    loading.value = true
+    loadError.value = ''
+  }
   try {
     const [ov, ms, gs, rr, hourlyRes, dailyRes] = await Promise.all([
       api.getStatsOverview(),
@@ -488,8 +508,12 @@ async function loadStats() {
     recentRequests.value = rr.requests || []
     hourlyStats.value = hourlyRes.hourly || []
     dailyStats.value = dailyRes.daily || []
+    loadError.value = ''
   } catch (e) {
     console.error('加载统计失败:', e)
+    if (!silent) loadError.value = errMsg(e, '统计加载失败')
+  } finally {
+    if (!silent) loading.value = false
   }
 }
 
@@ -501,7 +525,7 @@ function connectSSE() {
   eventSource.onmessage = (e) => {
     try {
       const entry = JSON.parse(e.data)
-      if (entry.type === 'stats') loadStats()
+      if (entry.type === 'stats') loadStats({ silent: true })
     } catch (err) {
       console.error('解析统计事件失败:', err)
     }
@@ -541,12 +565,17 @@ function confirmClear() {
 }
 
 async function doClear() {
+  if (clearing.value) return
+  clearing.value = true
   try {
     await api.clearStats()
     showConfirm.value = false
-    await loadStats()
+    await loadStats({ silent: true })
+    notify('统计数据已清空', 'success')
   } catch (e) {
-    console.error('清空统计失败:', e)
+    notify(errMsg(e, '清空统计失败'))
+  } finally {
+    clearing.value = false
   }
 }
 
@@ -643,7 +672,59 @@ function getRateClass(rate) {
 .modal-body {
   flex: 1;
   overflow-y: auto;
+  position: relative;
   padding: 24px;
+}
+
+/* 加载中：顶部细进度条，不遮挡已经渲染出来的旧数据 */
+.stats-loading {
+  position: sticky;
+  top: -24px;
+  margin: -24px -24px 16px;
+  height: 2px;
+  background: #e4e7ed;
+  overflow: hidden;
+  z-index: 2;
+}
+.stats-loading span {
+  display: block;
+  width: 30%;
+  height: 100%;
+  background: #409eff;
+  animation: stats-progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes stats-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(360%); }
+}
+
+.stats-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: #fef0f0;
+  border: 1px solid #fbc4c4;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #f56c6c;
+}
+.stats-error-retry {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 4px 14px;
+  background: #f56c6c;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.stats-error-retry:hover { background: #e04545; }
+
+@media (prefers-reduced-motion: reduce) {
+  .stats-loading span { animation: none; width: 100%; opacity: 0.6; }
 }
 
 .overview-section,

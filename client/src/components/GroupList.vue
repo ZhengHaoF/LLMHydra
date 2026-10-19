@@ -4,13 +4,17 @@
       <h3>配置组</h3>
       <button class="btn-add" @click="openAdd" title="新增配置组">+</button>
     </div>
+    <!-- 配置组写操作进行中：细进度条，避免新建/删除组时长时间无反馈 -->
+    <div v-if="busy" class="list-progress" aria-hidden="true"><span></span></div>
 
     <div class="proxy-control">
       <div class="status-indicator running">
         <span class="dot"></span>
-        <span>运行中 · 端口 {{ port }}</span>
+        <span>{{ restarting ? '重启中…' : `运行中 · 端口 ${port}` }}</span>
       </div>
-      <button class="btn-restart" @click="$emit('restart')" title="重启服务">重启</button>
+      <button class="btn-restart" @click="$emit('restart')" :disabled="restarting" title="重启服务">
+        {{ restarting ? '重启中…' : '重启' }}
+      </button>
     </div>
 
     <div class="list-body">
@@ -50,8 +54,10 @@
           </div>
           <div v-if="addError" class="form-error">{{ addError }}</div>
           <div class="confirm-actions">
-            <button class="btn-cancel" @click="addOpen = false">取消</button>
-            <button class="btn-danger" @click="confirmAdd">确认新增</button>
+            <button class="btn-cancel" @click="addOpen = false" :disabled="addPending">取消</button>
+            <button class="btn-danger" @click="confirmAdd" :disabled="addPending">
+              {{ addPending ? '创建中…' : '确认新增' }}
+            </button>
           </div>
         </div>
       </div>
@@ -82,8 +88,10 @@
           </div>
           <div v-if="editError" class="form-error">{{ editError }}</div>
           <div class="confirm-actions">
-            <button class="btn-cancel" @click="editModalTarget = null">取消</button>
-            <button class="btn-danger" @click="confirmEdit">确认</button>
+            <button class="btn-cancel" @click="editModalTarget = null" :disabled="editPending">取消</button>
+            <button class="btn-danger" @click="confirmEdit" :disabled="editPending">
+              {{ editPending ? '保存中…' : '确认' }}
+            </button>
           </div>
         </div>
       </div>
@@ -95,9 +103,12 @@
           <div class="confirm-body">
             确定要删除配置组 <strong>{{ getGroupName(pendingDelete) }}</strong> 吗？此操作不可撤销。
           </div>
+          <div v-if="delError" class="form-error">{{ delError }}</div>
           <div class="confirm-actions">
-            <button class="btn-cancel" @click="pendingDelete = null">取消</button>
-            <button class="btn-danger" @click="confirmDelete">确认删除</button>
+            <button class="btn-cancel" @click="pendingDelete = null" :disabled="delPending">取消</button>
+            <button class="btn-danger" @click="confirmDelete" :disabled="delPending">
+              {{ delPending ? '删除中…' : '确认删除' }}
+            </button>
           </div>
         </div>
       </div>
@@ -112,15 +123,23 @@ import { IconPencil, IconX, IconCopy } from '@tabler/icons-vue'
 const props = defineProps({
   groups: { type: Array, default: () => [] },
   activeId: { type: String, default: null },
-  port: { type: Number, default: 8093 }
+  port: { type: Number, default: 8093 },
+  restarting: { type: Boolean, default: false }, // 重启进行中
+  busy: { type: Boolean, default: false },       // 配置组写操作进行中
+  // 三个写操作由父组件提供，返回 Promise<{ ok, error }>：
+  // 弹窗自己决定是关闭还是留着显示错误，避免"弹窗先关、请求后失败"的无声失败
+  submitAdd: { type: Function, required: true },
+  submitRename: { type: Function, required: true },
+  submitDelete: { type: Function, required: true }
 })
 
-const emit = defineEmits(['select', 'add', 'rename', 'rename-name', 'delete', 'restart'])
+const emit = defineEmits(['select', 'restart'])
 
 // 新增
 const addOpen = ref(false)
 const addForm = ref({ id: '', name: '' })
 const addError = ref('')
+const addPending = ref(false)
 
 function openAdd() {
   addForm.value = { id: '', name: '' }
@@ -128,7 +147,8 @@ function openAdd() {
   addOpen.value = true
 }
 
-function confirmAdd() {
+async function confirmAdd() {
+  if (addPending.value) return
   const id = (addForm.value.id || '').trim()
   if (!id) {
     addError.value = 'ID 不能为空'
@@ -142,19 +162,41 @@ function confirmAdd() {
     addError.value = `ID "${id}" 已存在`
     return
   }
-  emit('add', { id, name: (addForm.value.name || '').trim() || id })
-  addOpen.value = false
+  addPending.value = true
+  try {
+    const r = await props.submitAdd({ id, name: (addForm.value.name || '').trim() || id })
+    if (r && r.ok) {
+      addOpen.value = false
+    } else {
+      // 服务端拒绝（重名、非法字符等）时保留弹窗，让用户就地改
+      addError.value = (r && r.error) || '新增失败'
+    }
+  } finally {
+    addPending.value = false
+  }
 }
 
 // 行内编辑 id 已废弃：改用模态框（openEditModal）
 
 // 删除
 const pendingDelete = ref(null)
+const delPending = ref(false)
+const delError = ref('')
 
-function confirmDelete() {
-  if (!pendingDelete.value) return
-  emit('delete', { oldId: pendingDelete.value, newId: null })
-  pendingDelete.value = null
+async function confirmDelete() {
+  if (!pendingDelete.value || delPending.value) return
+  delPending.value = true
+  delError.value = ''
+  try {
+    const r = await props.submitDelete({ oldId: pendingDelete.value })
+    if (r && r.ok) {
+      pendingDelete.value = null
+    } else {
+      delError.value = (r && r.error) || '删除失败'
+    }
+  } finally {
+    delPending.value = false
+  }
 }
 
 function getGroupName(id) {
@@ -167,6 +209,7 @@ const editModalTarget = ref(null)
 const editForm = ref({ id: '', name: '' })
 const editError = ref('')
 const editCopied = ref(false)
+const editPending = ref(false)
 
 function openEditModal(g) {
   editModalTarget.value = g.id
@@ -175,8 +218,9 @@ function openEditModal(g) {
   editCopied.value = false
 }
 
-function confirmEdit() {
-  if (!editModalTarget.value) return
+async function confirmEdit() {
+  if (!editModalTarget.value || editPending.value) return
+  const oldId = editModalTarget.value
   const newId = (editForm.value.id || '').trim()
   const newName = (editForm.value.name || '').trim()
   if (!newId) {
@@ -187,18 +231,22 @@ function confirmEdit() {
     editError.value = 'ID 仅允许中英文、数字和 -'
     return
   }
-  if (newId !== editModalTarget.value && props.groups.some((x) => x.id === newId)) {
+  if (newId !== oldId && props.groups.some((x) => x.id === newId)) {
     editError.value = `ID "${newId}" 已存在`
     return
   }
-  if (newId !== editModalTarget.value) {
-    // id 变了：等价于"删除旧的 + 新建 + 迁移 chain"
-    emit('rename', { oldId: editModalTarget.value, newId, name: newName || newId })
-  } else {
-    // id 没变：只改名称
-    emit('rename-name', { id: editModalTarget.value, name: newName || newId })
+  editPending.value = true
+  try {
+    // id 变了：新建 + 迁移 chain + 删旧；id 没变：只改名称。两者都由父组件分派
+    const r = await props.submitRename({ oldId, newId, name: newName || newId })
+    if (r && r.ok) {
+      editModalTarget.value = null
+    } else {
+      editError.value = (r && r.error) || '保存失败'
+    }
+  } finally {
+    editPending.value = false
   }
-  editModalTarget.value = null
 }
 
 async function copyEditId() {
@@ -297,6 +345,31 @@ async function copyText(text) {
   font-size: 12px;
 }
 .btn-restart:hover { background: #fdf6ec; }
+.btn-restart:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: #fdf6ec;
+}
+.list-progress {
+  height: 2px;
+  background: #e4e7ed;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.list-progress span {
+  display: block;
+  width: 30%;
+  height: 100%;
+  background: #409eff;
+  animation: list-progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes list-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(360%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .list-progress span { animation: none; width: 100%; opacity: 0.6; }
+}
 .list-body {
   flex: 1;
   overflow-y: auto;
@@ -458,4 +531,9 @@ async function copyText(text) {
 .btn-cancel:hover { color: #409eff; border-color: #c6e2ff; }
 .btn-danger { background: #409eff; color: #fff; border-color: #409eff; }
 .btn-danger:hover { background: #337ecc; }
+.btn-cancel:disabled,
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 </style>

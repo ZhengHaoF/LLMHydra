@@ -28,9 +28,13 @@
       </div>
       <div class="key-box">
         <div class="key-display">
-          <code class="key-value">{{ proxyKey }}</code>
-          <button class="btn-copy" @click="copyKey">复制</button>
-          <button class="btn-regenerate" @click="regenerateKey">重新生成</button>
+          <code v-if="keyLoading" class="key-value key-loading">加载中…</code>
+          <code v-else-if="keyError" class="key-value key-error">{{ keyError }}</code>
+          <code v-else class="key-value">{{ proxyKey }}</code>
+          <button class="btn-copy" @click="copyKey" :disabled="keyLoading || !!keyError">复制</button>
+          <button class="btn-regenerate" @click="regenerateKey" :disabled="regenerating || keyLoading">
+            {{ regenerating ? '生成中…' : '重新生成' }}
+          </button>
         </div>
         <p class="key-note">AI 工具调用时必须提供此密钥，填在 Api Key 字段。密钥泄露后可点击"重新生成"。</p>
       </div>
@@ -83,8 +87,12 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import api from '../api.js'
+import { notify, errMsg } from '../ui.js'
 
 const proxyKey = ref('')
+const keyLoading = ref(true)
+const keyError = ref('')
+const regenerating = ref(false)
 const toastVisible = ref(false)
 const toastMessage = ref('')
 let toastTimer = null
@@ -104,11 +112,16 @@ function showToast(message) {
 }
 
 async function loadProxyKey() {
+  keyLoading.value = true
+  keyError.value = ''
   try {
     const data = await api.getProxyKey()
     proxyKey.value = data.proxy_key || ''
+    if (!proxyKey.value) keyError.value = '密钥为空，请重新生成'
   } catch (e) {
-    console.error('加载代理密钥失败:', e)
+    keyError.value = errMsg(e, '密钥加载失败')
+  } finally {
+    keyLoading.value = false
   }
 }
 
@@ -120,21 +133,28 @@ function copyUrl() {
 }
 
 function copyKey() {
+  if (!proxyKey.value) return
   navigator.clipboard.writeText(proxyKey.value).then(() => {
     showToast('已复制到剪贴板')
   }).catch(() => {})
 }
 
 async function regenerateKey() {
+  if (regenerating.value) return
   if (!confirm('确定要重新生成代理密钥吗？旧的密钥将立即失效，所有使用旧密钥的 AI 工具都需要更新。')) {
     return
   }
+  regenerating.value = true
   try {
     const data = await api.regenerateProxyKey()
     proxyKey.value = data.proxy_key || ''
+    keyError.value = ''
     showToast('密钥已重新生成')
   } catch (e) {
-    console.error('重新生成代理密钥失败:', e)
+    // 这里用全局提示而不是页内 toast：失败信息往往更长，且需要停留更久
+    notify(errMsg(e, '重新生成密钥失败'))
+  } finally {
+    regenerating.value = false
   }
 }
 

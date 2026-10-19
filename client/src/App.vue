@@ -28,7 +28,7 @@
       <h1>LLMHydra</h1>
       <span class="subtitle">多端点自动故障转移 · 节点画布编排</span>
       <div class="header-spacer"></div>
-      <button class="btn-logout" @click="doLogout">退出</button>
+      <button class="btn-logout" @click="doLogout" :disabled="loggingOut">{{ loggingOut ? '退出中…' : '退出' }}</button>
       <button class="btn-api" @click="showApiRef = true">接口</button>
       <button class="btn-stats" @click="showStats = true">统计</button>
       <button class="btn-settings" @click="showSettings = true">设置</button>
@@ -42,11 +42,12 @@
           :active-id="activeGroupId"
           :port="port"
           @select="setActiveGroup"
-          @add="addGroup"
-          @rename="renameGroupId"
-          @rename-name="renameGroupName"
-          @delete="deleteGroup"
           @restart="doRestart"
+          :submit-add="addGroup"
+          :submit-rename="submitRenameGroup"
+          :submit-delete="deleteGroup"
+          :restarting="restarting"
+          :busy="groupPending"
         />
       </div>
 
@@ -57,13 +58,15 @@
             :models="models"
             :current-chain="currentChainIds"
             :stats-map="statsMap"
+            :submit-delete="deleteModel"
             @add="openAddModel"
             @edit="openEditModel"
-            @delete="deleteModel"
             @reorder="onLibraryReorder"
           />
         </div>
         <div class="canvas-bar">
+          <!-- 链路写操作进行中的细进度条：避免拖拽后长时间无反馈 -->
+          <div v-if="chainPending" class="chain-progress" aria-hidden="true"><span></span></div>
           <div class="canvas-title" v-if="activeGroup">
             <span class="canvas-group-id">{{ activeGroup.id }}</span>
             <span class="canvas-group-name">{{ activeGroup.name }}</span>
@@ -129,6 +132,7 @@
     <ModelEditorModal
       :model="editingModel"
       :is-new="editingIsNew"
+      :saving="savingModel"
       @save="saveModel"
       @cancel="closeEditor"
     />
@@ -154,6 +158,9 @@
     <!-- 设置弹窗 -->
     <SettingsModal :visible="showSettings" @close="showSettings = false" @saved="onSettingsSaved" @logout="onSettingsLogout" />
     </template>
+
+    <!-- 全局轻提示（成功 / 失败反馈统一出口） -->
+    <ToastHost />
   </div>
 </template>
 
@@ -168,6 +175,7 @@ import ApiReference from './components/ApiReference.vue'
 import StatsModal from './components/StatsModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import api from './api.js'
+import { notify, errMsg, usePending } from './ui.js'
 import { IconX } from '@tabler/icons-vue'
 
 // ---- 认证状态 ----
@@ -192,6 +200,13 @@ const logCollapsed = ref(false)
 // 首次配置加载状态：initialLoaded 为 false 时主区域显示加载遮罩（后台静默刷新不触发）
 const initialLoaded = ref(false)
 const initialError = ref('')
+
+// ---- 各操作的进行中状态 ----
+const { pending: savingModel, run: runSaveModel } = usePending()
+const { pending: restarting, run: runRestart } = usePending()
+const { pending: chainPending, run: runChain } = usePending()
+const { pending: groupPending, run: runGroup } = usePending()
+const loggingOut = ref(false)
 
 const editingModel = computed(() => {
   if (editingId.value === null) return null
@@ -354,11 +369,16 @@ async function doLogin() {
 }
 
 async function doLogout() {
-  // 通知服务端作废当前会话 token；仅清 localStorage 的话 token 在服务端依然有效
+  if (loggingOut.value) return
+  loggingOut.value = true
+  // 通知服务端作废当前会话 token；仅清 localStorage 的话 token 在服务端依然有效。
+  // 服务不可用时也要保证本地状态能清干净，所以超时由 api 层兜底，这里不做额外处理。
   try {
     await api.logout()
   } catch (e) {
-    // 服务端已不可用（如正在重启）时忽略，本地状态仍要清干净
+    // 服务端已不可用（如正在重启）时忽略
+  } finally {
+    loggingOut.value = false
   }
   api.clearToken()
   authenticated.value = false
@@ -384,58 +404,87 @@ function setActiveGroup(id) {
   activeGroupId.value = id
 }
 
+// 以下三个配置组写操作都返回 { ok, error }：由弹窗自己决定关闭还是显示错误
 async function addGroup({ id, name }) {
-  try {
-    const res = await api.addGroup(id, name)
-    if (res && res.success) {
-      await loadData()
+  const r = await runGroup(async () => {
+    try {
+      await api.addGroup(id, name)
       activeGroupId.value = id
-    } else {
-      alert(res.error || '新增失败')
+      await loadData()
+      notify(`配置组 ${id} 已创建`, 'success')
+      return { ok: true }
+    } catch (e) {
+      const error = errMsg(e, '新增配置组失败')
+      notify(error)
+      return { ok: false, error }
     }
-  } catch (e) {
-    console.error('新增配置组失败:', e)
-  }
+  })
+  return r || { ok: false, error: '正在处理中，请稍候' }
 }
 
-async function renameGroupId({ oldId, newId, name }) {
-  // 修改 id 等价于：删除旧的 + 新建一个并迁移 chain
-  // 通过后端 API 实现
+// 改 ID 等价于：新建 → 迁移 chain → 删除旧的；只改名字则只发一个请求
+async function submitRenameGroup({ oldId, newId, name }) {
+  if (newId === oldId) {
+    const r = await runGroup(async () => {
+      try {
+        await api.updateGroup(oldId, { name })
+        await loadData()
+        notify('名称已更新', 'success')
+        return { ok: true }
+      } catch (e) {
+        const error = errMsg(e, '重命名失败')
+        notify(error)
+        return { ok: false, error }
+      }
+    })
+    return r || { ok: false, error: '正在处理中，请稍候' }
+  }
+
   const oldGroup = groups.value.find((g) => g.id === oldId)
-  if (!oldGroup) return
+  if (!oldGroup) return { ok: false, error: '配置组已不存在，请刷新后重试' }
   const chainSnapshot = [...oldGroup.chain]
-  try {
-    // 1. 新建
-    await api.addGroup(newId, name)
-    // 2. 更新 chain
-    await api.updateGroup(newId, { chain: chainSnapshot })
-    // 3. 删除旧的
-    await api.deleteGroup(oldId)
-    await loadData()
-    if (activeGroupId.value === oldId) activeGroupId.value = newId
-  } catch (e) {
-    console.error('重命名 id 失败:', e)
-    alert('重命名失败')
-  }
-}
 
-async function renameGroupName({ id, name }) {
-  try {
-    await api.updateGroup(id, { name })
-    await loadData()
-  } catch (e) {
-    console.error('重命名失败:', e)
-  }
+  // 三步串行，中途失败会留下半成品，所以任何一步失败都要尽量回滚
+  const r = await runGroup(async () => {
+    let created = false
+    try {
+      await api.addGroup(newId, name)
+      created = true
+      await api.updateGroup(newId, { chain: chainSnapshot })
+      await api.deleteGroup(oldId)
+      if (activeGroupId.value === oldId) activeGroupId.value = newId
+      await loadData()
+      notify(`配置组已更名为 ${newId}`, 'success')
+      return { ok: true }
+    } catch (e) {
+      // 新组已建出但后续步骤失败：删掉新组，保证不留下两个同名组
+      if (created) {
+        try { await api.deleteGroup(newId) } catch { /* 回滚失败时靠刷新让用户看到真实状态 */ }
+      }
+      await loadData()
+      const error = errMsg(e, '重命名失败，已恢复原状')
+      notify(error, 'error', 4000)
+      return { ok: false, error }
+    }
+  })
+  return r || { ok: false, error: '正在处理中，请稍候' }
 }
 
 async function deleteGroup({ oldId }) {
-  try {
-    await api.deleteGroup(oldId)
-    if (activeGroupId.value === oldId) activeGroupId.value = null
-    await loadData()
-  } catch (e) {
-    console.error('删除失败:', e)
-  }
+  const r = await runGroup(async () => {
+    try {
+      await api.deleteGroup(oldId)
+      if (activeGroupId.value === oldId) activeGroupId.value = null
+      await loadData()
+      notify('配置组已删除', 'success')
+      return { ok: true }
+    } catch (e) {
+      const error = errMsg(e, '删除失败')
+      notify(error)
+      return { ok: false, error }
+    }
+  })
+  return r || { ok: false, error: '正在处理中，请稍候' }
 }
 
 // ---- 模型操作 ----
@@ -455,26 +504,37 @@ function closeEditor() {
 }
 
 async function saveModel(data) {
-  try {
-    if (editingIsNew.value) {
-      await api.addModel(data)
-    } else {
-      await api.updateModel(editingId.value, data)
+  await runSaveModel(async () => {
+    try {
+      if (editingIsNew.value) {
+        await api.addModel(data)
+      } else {
+        await api.updateModel(editingId.value, data)
+      }
+      closeEditor()
+      await loadData()
+      notify(editingIsNew.value ? '模型已新增' : '模型已保存', 'success')
+    } catch (e) {
+      // 不关弹窗：用户已填的内容不能丢，改正后直接重试即可
+      notify(errMsg(e, '保存模型失败'))
     }
-    closeEditor()
-    await loadData()
-  } catch (e) {
-    console.error('保存模型失败:', e)
-  }
+  })
 }
 
 async function deleteModel(id) {
-  try {
-    await api.deleteModel(id)
-    await loadData()
-  } catch (e) {
-    console.error('删除模型失败:', e)
-  }
+  const r = await runGroup(async () => {
+    try {
+      await api.deleteModel(id)
+      await loadData()
+      notify('模型已删除', 'success')
+      return { ok: true }
+    } catch (e) {
+      const error = errMsg(e, '删除模型失败')
+      notify(error)
+      return { ok: false, error }
+    }
+  })
+  return r || { ok: false, error: '正在处理中，请稍候' }
 }
 
 // ---- 画布操作 ----
@@ -494,10 +554,22 @@ async function onLibraryReorder(orderedIds) {
   try {
     await api.reorderModels(orderedIds)
   } catch (e) {
-    console.error('模型排序保存失败:', e)
     models.value = prev
     await loadData()
+    notify(errMsg(e, '排序保存失败，已恢复原顺序'))
   }
+}
+
+// 画布三个写操作都是「先存后刷新」，共用一份 pending，避免互相覆盖
+async function saveChain(group, newChain, failText) {
+  await runChain(async () => {
+    try {
+      await api.updateGroup(group.id, { chain: newChain })
+      await loadData()
+    } catch (e) {
+      notify(errMsg(e, failText))
+    }
+  })
 }
 
 async function onReorder(fromIdx, toIdx) {
@@ -507,12 +579,7 @@ async function onReorder(fromIdx, toIdx) {
   const [moved] = newChain.splice(fromIdx, 1)
   // toIdx 是"移除前"链中的目标位置：向前移动时，移除元素后目标下标要 -1
   newChain.splice(toIdx > fromIdx ? toIdx - 1 : toIdx, 0, moved)
-  try {
-    await api.updateGroup(g.id, { chain: newChain })
-    await loadData()
-  } catch (e) {
-    console.error('重排失败:', e)
-  }
+  await saveChain(g, newChain, '节点排序保存失败')
 }
 
 async function onAddToChain(modelId, targetIdx) {
@@ -525,38 +592,52 @@ async function onAddToChain(modelId, targetIdx) {
   } else {
     newChain.push(modelId)
   }
-  try {
-    await api.updateGroup(g.id, { chain: newChain })
-    await loadData()
-  } catch (e) {
-    console.error('加入链路失败:', e)
-  }
+  await saveChain(g, newChain, '加入链路失败')
 }
 
 async function onRemoveFromChain(modelId) {
   const g = activeGroup.value
   if (!g) return
   const newChain = g.chain.filter((id) => id !== modelId)
-  try {
-    await api.updateGroup(g.id, { chain: newChain })
-    await loadData()
-  } catch (e) {
-    console.error('移除失败:', e)
-  }
+  await saveChain(g, newChain, '移除节点失败')
 }
 
 // ---- 其他 ----
 async function doRestart() {
-  try {
-    await api.restart()
-  } catch (e) {
-    // 重启会断开连接，错误是预期的
+  if (!window.confirm('确定要重启服务吗？重启期间请求会中断，且需要重新登录。')) return
+  await runRestart(async () => {
+    try {
+      await api.restart()
+    } catch (e) {
+      // 服务立刻断开连接，这里是预期内的失败；真正的判断交给下面的探测
+    }
+    notify('正在重启服务，等待恢复…', 'info', 4000)
+    const ok = await waitForServer(30000)
+    if (ok) {
+      // 重启会清空服务端内存里的会话，重新登录才能继续操作
+      notify('服务已重启，请重新登录', 'warn', 3000)
+      setTimeout(() => window.location.reload(), 800)
+    } else {
+      notify('服务未在预期时间内恢复，请手动检查', 'error', 5000)
+    }
+  })
+}
+
+// 轮询静态首页探测服务是否已恢复（不能用 /api/*，它需要已失效的 token）
+async function waitForServer(timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch('/', { cache: 'no-store' })
+      if (r.ok) return true
+    } catch { /* 服务还没启起来 */ }
+    await new Promise((res) => setTimeout(res, 1000))
   }
+  return false
 }
 
 function onSettingsSaved() {
-  // 设置保存成功，不需要额外操作
-  console.log('设置已保存')
+  notify('设置已保存', 'success')
 }
 
 function onSettingsLogout() {
@@ -671,6 +752,10 @@ function onSettingsLogout() {
 .btn-logout:hover {
   background: rgba(245, 108, 108, 0.25);
 }
+.btn-logout:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .header {
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
   color: #fff;
@@ -753,6 +838,27 @@ function onSettingsLogout() {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+}
+/* 链路写操作进度条：细条贴在画布顶部，不挤压布局 */
+.chain-progress {
+  height: 2px;
+  background: #e4e7ed;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.chain-progress span {
+  display: block;
+  width: 30%;
+  height: 100%;
+  background: #409eff;
+  animation: chain-progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes chain-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(360%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chain-progress span { animation: none; width: 100%; opacity: 0.6; }
 }
 .canvas-title {
   padding: 10px 24px;

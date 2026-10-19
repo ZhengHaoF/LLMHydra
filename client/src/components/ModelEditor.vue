@@ -150,11 +150,13 @@
     </Teleport>
 
     <div class="form-actions">
-      <button class="btn-cancel" @click="$emit('cancel')">取消</button>
-      <button class="btn-test" @click="handleTest" :disabled="testing">
+      <button class="btn-cancel" @click="$emit('cancel')" :disabled="saving">取消</button>
+      <button class="btn-test" @click="handleTest" :disabled="testing || saving">
         {{ testing ? '测试中...' : '测试' }}
       </button>
-      <button class="btn-save" @click="handleSave">保存</button>
+      <button class="btn-save" @click="handleSave" :disabled="saving">
+        {{ saving ? '保存中…' : '保存' }}
+      </button>
     </div>
   </div>
 </template>
@@ -189,7 +191,8 @@ async function getOrCache() {
 
 const props = defineProps({
   model: { type: Object, default: () => ({}) },
-  isNew: { type: Boolean, default: true }
+  isNew: { type: Boolean, default: true },
+  saving: { type: Boolean, default: false } // 父组件保存请求进行中
 })
 
 const emit = defineEmits(['save', 'cancel'])
@@ -369,6 +372,7 @@ async function handleMatch(manual) {
 }
 
 function handleSave() {
+  if (props.saving) return // 保存中：忽略重复点击
   if (!form.display_name.trim()) return alert('请输入显示名称');
   if (!form.model_id.trim()) return alert('请输入模型 ID');
   const url = (form.endpoint.url || '').trim();
@@ -683,6 +687,15 @@ function formatResponse(val) {
   border-color: #409eff;
 }
 .btn-save:hover { background: #337ecc; }
+.btn-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: #337ecc;
+}
+.btn-cancel:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .btn-test {
   padding: 7px 18px;
   border-radius: 4px;

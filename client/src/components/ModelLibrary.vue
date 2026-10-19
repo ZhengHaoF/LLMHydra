@@ -56,9 +56,12 @@
             确定要删除模型 <strong>{{ getModelName(pendingDelete) }}</strong> 吗？<br>
             <span style="color:#e6a23c;font-size:12px">该模型会从所有配置组的链路中移除。</span>
           </div>
+          <div v-if="delError" class="form-error">{{ delError }}</div>
           <div class="confirm-actions">
-            <button class="btn-cancel" @click="pendingDelete = null">取消</button>
-            <button class="btn-danger" @click="confirmDelete">确认删除</button>
+            <button class="btn-cancel" @click="closeDelete" :disabled="delPending">取消</button>
+            <button class="btn-danger" @click="confirmDelete" :disabled="delPending">
+              {{ delPending ? '删除中…' : '确认删除' }}
+            </button>
           </div>
         </div>
       </div>
@@ -73,12 +76,16 @@ import { IconX } from '@tabler/icons-vue'
 const props = defineProps({
   models: { type: Array, default: () => [] },
   currentChain: { type: Array, default: () => [] }, // 当前画布上的 model id 列表
-  statsMap: { type: Object, default: () => ({}) }    // model_id -> { total_requests, total_tokens }
+  statsMap: { type: Object, default: () => ({}) },   // model_id -> { total_requests, total_tokens }
+  // 删除由父组件执行，返回 Promise<{ ok, error }>：失败时保留弹窗并显示原因
+  submitDelete: { type: Function, required: true }
 })
 
-const emit = defineEmits(['add', 'edit', 'delete', 'reorder'])
+const emit = defineEmits(['add', 'edit', 'reorder'])
 
 const pendingDelete = ref(null)
+const delPending = ref(false)
+const delError = ref('')
 
 // ---- 库内拖拽排序状态 ----
 const bodyRef = ref(null)
@@ -205,10 +212,26 @@ function getStats(modelId) {
   return `${req}次 ${tok}tok`
 }
 
-function confirmDelete() {
-  if (!pendingDelete.value) return
-  emit('delete', pendingDelete.value)
+function closeDelete() {
+  if (delPending.value) return
   pendingDelete.value = null
+  delError.value = ''
+}
+
+async function confirmDelete() {
+  if (!pendingDelete.value || delPending.value) return
+  delPending.value = true
+  delError.value = ''
+  try {
+    const r = await props.submitDelete(pendingDelete.value)
+    if (r && r.ok) {
+      pendingDelete.value = null
+    } else {
+      delError.value = (r && r.error) || '删除失败'
+    }
+  } finally {
+    delPending.value = false
+  }
 }
 </script>
 
@@ -377,6 +400,14 @@ function confirmDelete() {
 .confirm-title { font-size: 16px; font-weight: 600; color: #303133; margin-bottom: 12px; }
 .confirm-body { font-size: 14px; color: #606266; line-height: 1.6; margin-bottom: 20px; }
 .confirm-body strong { color: #f56c6c; }
+.form-error {
+  color: #f56c6c;
+  font-size: 12px;
+  background: #fef0f0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
 .confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .btn-cancel, .btn-danger {
   padding: 7px 20px; border-radius: 4px; border: 1px solid #dcdfe6;
@@ -386,4 +417,9 @@ function confirmDelete() {
 .btn-cancel:hover { color: #409eff; border-color: #c6e2ff; }
 .btn-danger { background: #f56c6c; color: #fff; border-color: #f56c6c; }
 .btn-danger:hover { background: #e04545; }
+.btn-cancel:disabled,
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 </style>
