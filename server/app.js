@@ -1438,7 +1438,7 @@ function createApp(configManager) {
     const { id, name } = req.body;
     if (!id) return res.status(400).json({ error: 'id is required' });
     if (!isValidGroupId(id)) {
-      return res.status(400).json({ error: '配置组 ID 仅允许中英文、数字和 -' });
+      return res.status(400).json({ error: '配置组 ID 仅允许中英文、数字、-、_ 和 .' });
     }
     try {
       const g = configManager.addGroup(id, name);

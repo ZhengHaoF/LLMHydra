@@ -45,7 +45,7 @@
             <div class="form-row">
               <label>配置组 ID（调用名）</label>
               <input v-model="addForm.id" placeholder="例如: deepseek-v4" maxlength="64" />
-              <div class="form-hint">仅允许中英文、数字和 -</div>
+              <div class="form-hint">仅允许中英文、数字、-、_ 和 .</div>
             </div>
             <div class="form-row">
               <label>显示名称（可选）</label>
@@ -79,7 +79,7 @@
                   title="复制 ID"
                 ><IconCopy :size="13" /> {{ editCopied ? '已复制' : '复制' }}</button>
               </div>
-              <div class="form-hint">仅允许中英文、数字和 -</div>
+              <div class="form-hint">仅允许中英文、数字、-、_ 和 .</div>
             </div>
             <div class="form-row">
               <label>显示名称</label>
@@ -154,8 +154,8 @@ async function confirmAdd() {
     addError.value = 'ID 不能为空'
     return
   }
-  if (!/^[a-zA-Z0-9\u4e00-\u9fa5-]+$/.test(id)) {
-    addError.value = 'ID 仅允许中英文、数字和 -'
+  if (!/^[a-zA-Z0-9\u4e00-\u9fa5_.-]+$/.test(id)) {
+    addError.value = 'ID 仅允许中英文、数字、-、_ 和 .'
     return
   }
   if (props.groups.some((g) => g.id === id)) {
@@ -227,8 +227,8 @@ async function confirmEdit() {
     editError.value = 'ID 不能为空'
     return
   }
-  if (!/^[a-zA-Z0-9\u4e00-\u9fa5-]+$/.test(newId)) {
-    editError.value = 'ID 仅允许中英文、数字和 -'
+  if (!/^[a-zA-Z0-9\u4e00-\u9fa5_.-]+$/.test(newId)) {
+    editError.value = 'ID 仅允许中英文、数字、-、_ 和 .'
     return
   }
   if (newId !== oldId && props.groups.some((x) => x.id === newId)) {

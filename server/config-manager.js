@@ -73,8 +73,8 @@ const DEFAULT_CONFIG = {
   models: []
 };
 
-// group id 校验：仅允许英文、数字、-、_
-const GROUP_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+// group id 校验：允许中英文、数字、-、_、.（与前端 GroupList.vue 保持一致）
+const GROUP_ID_REGEX = /^[a-zA-Z0-9\u4e00-\u9fa5_.-]+$/;
 
 function isValidGroupId(id) {
   return typeof id === 'string' && id.length > 0 && GROUP_ID_REGEX.test(id);
@@ -245,7 +245,7 @@ class ConfigManager {
   addGroup(id, name) {
     this._ensureConfig();
     if (!isValidGroupId(id)) {
-      throw new Error('配置组 ID 仅允许中英文、数字和 -');
+      throw new Error('配置组 ID 仅允许中英文、数字、-、_ 和 .');
     }
     if (this.isGroupIdTaken(id)) {
       throw new Error(`配置组 ID "${id}" 已存在`);
